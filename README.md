@@ -7,6 +7,7 @@ Bundle package containing all local extensions:
 - **pi-multi-pass**: Interactive route manager (`/route`)
 - **pi-session-id**: Session tracking and Mistral role fixes
 - **pi-agents-md**: Creates AGENTS.md from internal template
+- **pi-search-tool**: Code search with `/search` command
 
 ## Usage
 
