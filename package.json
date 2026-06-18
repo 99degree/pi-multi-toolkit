@@ -1,0 +1,15 @@
+{
+  "name": "pi-multi-toolkit",
+  "version": "1.0.0",
+  "description": "Bundle of all local extensions: replace-tool, multi-subs, multi-pass, session-id, agents-md",
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions/replace-tool.ts",
+      "./extensions/subs.ts",
+      "./extensions/route.ts",
+      "./extensions/session-id.ts",
+      "./extensions/agents-md.ts"
+    ]
+  }
+}
