@@ -4,8 +4,8 @@
  * Responsibilities:
  * 1. Send session ID as SYSTEM message as first message to model
  * 2. Always apply Mistral role fix (developer, compactionSummary → system)
- * 3. Remove tool/toolResult messages for Mistral compatibility
- * 4. Log fixes for debugging
+ * 3. Remove tool/toolResult/bashExecution messages for Mistral compatibility
+ * 4. Log before/after for debugging
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
@@ -46,13 +46,11 @@ function fixMistralMessages(msgs: any[], sessionId: string, needsReinject: boole
         content: `[Session-ID: ${sessionId}]`,
       });
       modified = true;
-      console.log(`[session-id] Added session ID as system message`);
     }
   }
 
   // 2) Role fix: Convert non-Mistral roles to system
-  // Mistral only supports: system, user, assistant, tool
-  // But tool/toolResult will be removed below, so convert others to system
+  // Mistral only supports: system, user, assistant
   const rolesToConvert = new Set(["developer", "compactionSummary"]);
   for (let i = 0; i < messages.length; i++) {
     if (rolesToConvert.has(messages[i].role)) {
@@ -61,20 +59,17 @@ function fixMistralMessages(msgs: any[], sessionId: string, needsReinject: boole
     }
   }
 
-  // 3) Remove tool and toolResult messages - Mistral doesn't support them
+  // 3) Remove tool-related messages - Mistral doesn't support them
+  // These are all internal pi messages for tool execution
+  const rolesToRemove = new Set(["tool", "toolResult", "bashExecution"]);
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "tool" || messages[i].role === "toolResult") {
+    if (rolesToRemove.has(messages[i].role)) {
       messages.splice(i, 1);
       modified = true;
     }
   }
 
   return { messages, modified };
-}
-
-function logRoles(msgs: any[], label: string) {
-  const roles = msgs.map((m: any) => m.role).join(" → ");
-  console.log(`[session-id] ${label}: ${roles}`);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -86,11 +81,13 @@ export default function (pi: ExtensionAPI) {
     sessionId = await getOrCreateSessionId();
     ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
     needsReinject = true;
+    console.log(`[session-id] Session started: ${sessionId}`);
   });
 
   // ── After compact: re-inject session ID on next turn ──
   pi.on("session_compact", async () => {
     needsReinject = true;
+    console.log(`[session-id] Compact detected, will re-inject session ID`);
   });
 
   // ── Context: fix messages + inject session ID as first system message ──
@@ -102,8 +99,10 @@ export default function (pi: ExtensionAPI) {
     let modified = rolesModified;
     
     const rolesAfter = messages.map((m: any) => m.role).join(" → ");
+    
     if (rolesBefore !== rolesAfter) {
-      console.log(`[session-id] context fix: ${rolesBefore} → ${rolesAfter}`);
+      console.log(`[session-id] BEFORE: ${rolesBefore}`);
+      console.log(`[session-id] AFTER:  ${rolesAfter}`);
     }
 
     // Reset needsReinject after processing
@@ -122,8 +121,10 @@ export default function (pi: ExtensionAPI) {
     const { messages, modified } = fixMistralMessages(msgs, sessionId, false);
     
     const rolesAfter = messages.map((m: any) => m.role).join(" → ");
+    
     if (rolesBefore !== rolesAfter) {
-      console.log(`[session-id] model_request fix: ${rolesBefore} → ${rolesAfter}`);
+      console.log(`[session-id] model_request BEFORE: ${rolesBefore}`);
+      console.log(`[session-id] model_request AFTER:  ${rolesAfter}`);
     }
     
     return modified ? { messages } : undefined;
