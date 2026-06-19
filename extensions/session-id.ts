@@ -4,8 +4,8 @@
  * Responsibilities:
  * 1. Inject [Session-ID] into system prompt on first message and after compact
  * 2. Always apply Mistral role fix (developer → system) — Mistral rejects "developer"
- * 3. Remove tool/toolResult messages for Mistral compatibility
- * 4. Log 400 errors with message history for debugging
+ * 3. After compact: drop messages until valid user/system msg for Mistral compatibility
+ * 4. Log fixes for debugging
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
@@ -26,12 +26,31 @@ async function getOrCreateSessionId(): Promise<string> {
   }
 }
 
-function fixMistralMessages(msgs: any[]): { messages: any[]; modified: boolean } {
+function fixMistralMessages(msgs: any[], afterCompact: boolean = false): { messages: any[]; modified: boolean } {
   let modified = false;
   const messages = [...msgs]; // Work on a copy
 
+  // If this is after compact, drop all messages until we find a valid user or system message
+  if (afterCompact) {
+    const validRoles = new Set(["user", "system", "developer"]);
+    let firstValidIndex = -1;
+    
+    for (let i = 0; i < messages.length; i++) {
+      if (validRoles.has(messages[i].role)) {
+        firstValidIndex = i;
+        break;
+      }
+    }
+    
+    if (firstValidIndex > 0) {
+      // Drop all messages before the first valid one
+      messages.splice(0, firstValidIndex);
+      modified = true;
+      console.log(`[session-id] Dropped ${firstValidIndex} messages until valid user/system msg`);
+    }
+  }
+
   // 1) Remove tool and toolResult messages - Mistral doesn't support them
-  // These are internal pi messages for tool calls, not part of the conversation
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "tool" || messages[i].role === "toolResult") {
       messages.splice(i, 1);
@@ -58,17 +77,20 @@ function logRoles(msgs: any[], label: string) {
 export default function (pi: ExtensionAPI) {
   let sessionId = "";
   let needsReinject = true;
+  let afterCompact = false;
 
   // ── Session start: get session ID ──
   pi.on("session_start", async (_event: any, ctx: any) => {
     sessionId = await getOrCreateSessionId();
     ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
     needsReinject = true;
+    afterCompact = false;
   });
 
-  // ── After compact: re-inject session ID on next turn ──
+  // ── After compact: mark that next context needs cleanup ──
   pi.on("session_compact", async () => {
     needsReinject = true;
+    afterCompact = true;
   });
 
   // ── Context: fix messages + inject session ID ──
@@ -76,8 +98,13 @@ export default function (pi: ExtensionAPI) {
     const msgs = event.messages || [];
     const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
     
-    const { messages, modified: rolesModified } = fixMistralMessages(msgs);
+    const { messages, modified: rolesModified } = fixMistralMessages(msgs, afterCompact);
     let modified = rolesModified;
+    
+    // Reset afterCompact flag after processing
+    if (afterCompact) {
+      afterCompact = false;
+    }
     
     const rolesAfter = messages.map((m: any) => m.role).join(" → ");
     if (rolesBefore !== rolesAfter) {
@@ -129,10 +156,6 @@ export default function (pi: ExtensionAPI) {
       
       console.log(`[session-id] 400 ERROR: ${errorMsg}`);
       console.log(`[session-id] Message roles: ${roles}`);
-      console.log(`[session-id] Full messages:`);
-      messages.forEach((msg: any, idx: number) => {
-        console.log(`[session-id] [${idx}] ${msg.role}: ${typeof msg.content === 'string' ? msg.content.slice(0, 100) : JSON.stringify(msg.content).slice(0, 100)}...`);
-      });
     }
   });
 }
