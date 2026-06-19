@@ -8,7 +8,11 @@
  * Stage 2: Role normalization (only after 400 error)
  *   - Trigger: model_error with statusCode 400
  *   - Purpose: Fix role issues that Mistral rejects
- *   - Actions: Convert tool→assistant, compactionSummary→system, remove toolCall objects
+ *   - Actions: 
+ *     - Remove tool, toolResult, bashExecution messages (don't convert to assistant)
+ *     - Convert compactionSummary, developer to system
+ *     - Remove toolCall objects from content arrays
+ *     - Ensure conversation doesn't end with assistant message
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
@@ -71,7 +75,7 @@ function normalizeRoles(msgs: any[]): { messages: any[]; modified: boolean } {
   let modified = false;
   let messages = [...msgs];
   
-  // Convert compactionSummary and developer to system
+  // 1. Convert compactionSummary and developer to system
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     if (!m) continue;
@@ -86,31 +90,34 @@ function normalizeRoles(msgs: any[]): { messages: any[]; modified: boolean } {
     }
   }
   
-  // Convert tool, toolResult, bashExecution to assistant and remove toolCall objects
-  for (let i = 0; i < messages.length; i++) {
+  // 2. Remove tool, toolResult, bashExecution messages entirely
+  // Don't convert to assistant - that can cause "last message is assistant" error
+  for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (!m) continue;
     
     if (m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution") {
-      messages[i] = { 
-        ...m, 
-        role: "assistant",
-        content: sanitizeContent(m.content || m.output || m.summary || ""),
-      };
+      messages.splice(i, 1);
       modified = true;
-    } else if (m.role === "assistant" && Array.isArray(m.content)) {
-      const hasToolCall = m.content.some((c: any) => c.type === 'toolCall');
-      if (hasToolCall) {
-        messages[i] = { 
-          ...m, 
-          content: sanitizeContent(m.content),
-        };
-        modified = true;
-      }
     }
   }
   
-  // Clean up consecutive system messages
+  // 3. Remove toolCall objects from content arrays
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (!m || !Array.isArray(m.content)) continue;
+    
+    const hasToolCall = m.content.some((c: any) => c.type === 'toolCall');
+    if (hasToolCall) {
+      messages[i] = { 
+        ...m, 
+        content: m.content.filter((c: any) => c.type !== 'toolCall'),
+      };
+      modified = true;
+    }
+  }
+  
+  // 4. Clean up consecutive system messages
   for (let i = 1; i < messages.length; i++) {
     if (messages[i]?.role === "system" && messages[i-1]?.role === "system") {
       const prevHasSessionId = Array.isArray(messages[i-1].content) && 
@@ -123,10 +130,17 @@ function normalizeRoles(msgs: any[]): { messages: any[]; modified: boolean } {
     }
   }
   
+  // 5. Ensure conversation doesn't end with assistant message
+  // Mistral error: "Cannot set add_generation_prompt to True when the last message is from the assistant"
+  while (messages.length > 0 && messages[messages.length - 1]?.role === "assistant") {
+    messages.pop();
+    modified = true;
+  }
+  
   if (modified) {
     console.log(`[session-id] Role normalization applied`);
     const roles = messages.map((m: any) => m.role).join(' → ');
-    console.log(`[session-id] Roles after fix: ${roles}`);
+    console.log(`[session-id] Roles: ${roles}`);
   }
   
   return { messages, modified };
@@ -153,41 +167,6 @@ function ensureContentFormat(content: any): any {
       }
       return { type: 'text', text: JSON.stringify(item) };
     });
-  }
-  if (typeof content === 'object') {
-    if (content.text !== undefined) {
-      return [{ type: 'text', text: String(content.text) }];
-    }
-    if (content.summary !== undefined) {
-      return [{ type: 'text', text: String(content.summary) }];
-    }
-    if (content.output !== undefined) {
-      return [{ type: 'text', text: String(content.output) }];
-    }
-  }
-  return [{ type: 'text', text: JSON.stringify(content) }];
-}
-
-function sanitizeContent(content: any): any {
-  if (content === undefined || content === null) {
-    return [];
-  }
-  if (typeof content === 'string') {
-    return [{ type: 'text', text: content }];
-  }
-  if (Array.isArray(content)) {
-    // Filter out toolCall objects, keep only text
-    return content
-      .filter((item: any) => item.type !== 'toolCall')
-      .map((item: any) => {
-        if (typeof item === 'string') {
-          return { type: 'text', text: item };
-        }
-        if (item && item.text !== undefined) {
-          return { type: 'text', text: String(item.text) };
-        }
-        return { type: 'text', text: JSON.stringify(item) };
-      });
   }
   if (typeof content === 'object') {
     if (content.text !== undefined) {
@@ -230,7 +209,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("model_error", async (event: any) => {
     if (event?.error?.statusCode === 400) {
       applyRoleFix = true;
-      console.log(`[session-id] 400 ERROR detected - will apply role fix on next request`);
+      console.log(`[session-id] 400 ERROR - will apply role fix`);
       console.log(`[session-id] Error: ${event.error.message || String(event.error)}`);
     }
   });
@@ -256,7 +235,7 @@ export default function (pi: ExtensionAPI) {
       const { messages: newMessages, modified: roleModified } = normalizeRoles(messages);
       messages = newMessages;
       modified = modified || roleModified;
-      applyRoleFix = false; // Reset after applying
+      applyRoleFix = false; // Reset after applying once
     }
     
     return modified ? { messages } : undefined;
@@ -270,7 +249,7 @@ export default function (pi: ExtensionAPI) {
     let messages = [...msgs];
     let modified = false;
     
-    // Stage 1: Inject session ID (should already be done, but just in case)
+    // Stage 1: Inject session ID
     if (needsSessionIdInjection) {
       const { messages: newMessages, modified: sessionIdModified } = injectSessionId(messages, sessionId);
       messages = newMessages;
@@ -283,13 +262,13 @@ export default function (pi: ExtensionAPI) {
       const { messages: newMessages, modified: roleModified } = normalizeRoles(messages);
       messages = newMessages;
       modified = modified || roleModified;
-      applyRoleFix = false; // Reset after applying
+      applyRoleFix = false; // Reset after applying once
     }
     
     return modified ? { messages } : undefined;
   });
 
-  // ── model_request: apply both fixes (belt and suspenders) ──
+  // ── model_request: apply both fixes ──
   pi.on("model_request", async (event: any) => {
     const msgs = event?.messages;
     if (!msgs || !Array.isArray(msgs)) return;
