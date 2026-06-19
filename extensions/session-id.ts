@@ -4,7 +4,7 @@
  * Responsibilities:
  * 1. Send session ID as SYSTEM message as first message to model
  * 2. Convert developer, compactionSummary → system
- * 3. Remove ALL tool, toolResult, bashExecution messages (Mistral API doesn't like them)
+ * 3. Convert tool/toolResult/bashExecution → assistant (Mistral template supports tool role but pi's format differs)
  * 4. Ensure proper role alternation for Mistral
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -47,47 +47,48 @@ function fixMistralMessages(msgs: any[], sessionId: string, needsReinject: boole
     }
   }
 
-  // 2) Convert non-standard roles to system
-  const rolesToConvert = new Set(["developer", "compactionSummary"]);
+  // 2) Convert non-standard roles to standard ones
+  // developer, compactionSummary → system
+  const rolesToSystem = new Set(["developer", "compactionSummary"]);
   for (let i = 0; i < messages.length; i++) {
-    if (rolesToConvert.has(messages[i].role)) {
+    if (rolesToSystem.has(messages[i].role)) {
       messages[i] = { ...messages[i], role: "system" };
       modified = true;
     }
   }
 
-  // 3) Remove ALL tool-related messages (Mistral API rejects these)
-  const rolesToRemove = new Set(["tool", "toolResult", "bashExecution"]);
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (rolesToRemove.has(messages[i].role)) {
-      messages.splice(i, 1);
+  // 3) Convert tool-related messages to assistant role
+  // Mistral template supports 'tool' role but pi sends standalone toolResult messages
+  // which don't match Mistral's expected format (tool_calls in assistant message)
+  // So convert them to assistant for compatibility
+  const toolRoles = new Set(["tool", "toolResult", "bashExecution"]);
+  for (let i = 0; i < messages.length; i++) {
+    if (toolRoles.has(messages[i].role)) {
+      messages[i] = { ...messages[i], role: "assistant" };
       modified = true;
     }
   }
 
-  // 4) Ensure proper alternation: after system, must be user or assistant
-  // After user, must be assistant
-  // After assistant, must be user or assistant
-  // Remove any message that breaks this pattern
+  // 4) Ensure proper alternation: user → assistant → user → assistant...
+  // Remove any message that breaks this basic pattern
   for (let i = 0; i < messages.length - 1; i++) {
     const current = messages[i];
     const next = messages[i + 1];
     
-    // Check for invalid transitions
-    if (current.role === "user" && next.role !== "assistant") {
-      // Remove the next message if it's not assistant after user
-      if (next.role !== "system") {
-        messages.splice(i + 1, 1);
-        modified = true;
-        i--; // Re-check this position
-      }
-    } else if (current.role === "assistant" && next.role !== "user" && next.role !== "assistant") {
-      // Remove the next message if it's not user or assistant after assistant
+    // user must be followed by assistant or system
+    if (current.role === "user" && next.role !== "assistant" && next.role !== "system") {
       messages.splice(i + 1, 1);
       modified = true;
       i--; // Re-check this position
-    } else if (current.role === "system" && next.role !== "user" && next.role !== "assistant" && next.role !== "system") {
-      // Remove the next message if it's not user, assistant, or system after system
+    }
+    // assistant can be followed by user, assistant, or system
+    else if (current.role === "assistant" && next.role !== "user" && next.role !== "assistant" && next.role !== "system") {
+      messages.splice(i + 1, 1);
+      modified = true;
+      i--; // Re-check this position
+    }
+    // system can be followed by user, assistant, or system
+    else if (current.role === "system" && next.role !== "user" && next.role !== "assistant" && next.role !== "system") {
       messages.splice(i + 1, 1);
       modified = true;
       i--; // Re-check this position
@@ -106,11 +107,13 @@ export default function (pi: ExtensionAPI) {
     sessionId = await getOrCreateSessionId();
     ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
     needsReinject = true;
+    console.log(`[session-id] Session started: ${sessionId}`);
   });
 
   // ── After compact: re-inject session ID on next turn ──
   pi.on("session_compact", async () => {
     needsReinject = true;
+    console.log(`[session-id] Compact detected, will re-inject session ID`);
   });
 
   // ── Context: fix messages + inject session ID ──
@@ -153,7 +156,7 @@ export default function (pi: ExtensionAPI) {
     return modified ? { messages } : undefined;
   });
 
-  // ── Before model call: final check (if this event exists) ──
+  // ── Before model call: final check ──
   pi.on("before_model_call", async (event: any) => {
     if (event.messages) {
       const msgs = event.messages;
@@ -173,7 +176,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // ── Error handling: log 400 errors with full details ──
+  // ── Error handling: log 400 errors ──
   pi.on("model_error", async (event: any) => {
     if (event.error && event.error.statusCode === 400) {
       const errorMsg = event.error.message || String(event.error);
@@ -182,16 +185,6 @@ export default function (pi: ExtensionAPI) {
       
       console.log(`[session-id] 400 ERROR: ${errorMsg}`);
       console.log(`[session-id] Roles: ${roles}`);
-      console.log(`[session-id] Message count: ${messages.length}`);
-      
-      // Show first few messages
-      for (let i = 0; i < Math.min(messages.length, 5); i++) {
-        const msg = messages[i];
-        const content = typeof msg.content === 'string' ? msg.content.slice(0, 50) : 
-                       Array.isArray(msg.content) ? JSON.stringify(msg.content.slice(0, 1)).slice(0, 50) : 
-                       JSON.stringify(msg.content).slice(0, 50);
-        console.log(`[session-id]   [${i}] ${msg.role}: ${content}`);
-      }
     }
   });
 }
