@@ -3,8 +3,8 @@
  *
  * Responsibilities:
  * 1. Inject [Session-ID] into system prompt on first message and after compact
- * 2. Always apply Mistral role fix (developer → system) — Mistral rejects "developer"
- * 3. After compact: drop messages until valid user/system msg for Mistral compatibility
+ * 2. Always apply Mistral role fix (developer, compactionSummary → system)
+ * 3. Remove tool/toolResult messages for Mistral compatibility
  * 4. Log fixes for debugging
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -26,42 +26,25 @@ async function getOrCreateSessionId(): Promise<string> {
   }
 }
 
-function fixMistralMessages(msgs: any[], afterCompact: boolean = false): { messages: any[]; modified: boolean } {
+function fixMistralMessages(msgs: any[]): { messages: any[]; modified: boolean } {
   let modified = false;
   const messages = [...msgs]; // Work on a copy
 
-  // If this is after compact, drop all messages until we find a valid user or system message
-  if (afterCompact) {
-    const validRoles = new Set(["user", "system", "developer"]);
-    let firstValidIndex = -1;
-    
-    for (let i = 0; i < messages.length; i++) {
-      if (validRoles.has(messages[i].role)) {
-        firstValidIndex = i;
-        break;
-      }
-    }
-    
-    if (firstValidIndex > 0) {
-      // Drop all messages before the first valid one
-      messages.splice(0, firstValidIndex);
+  // 1) Role fix: Convert non-Mistral roles to system
+  // Mistral only supports: system, user, assistant, tool
+  // But tool/toolResult will be removed below, so convert others to system
+  const rolesToConvert = new Set(["developer", "compactionSummary"]);
+  for (let i = 0; i < messages.length; i++) {
+    if (rolesToConvert.has(messages[i].role)) {
+      messages[i] = { ...messages[i], role: "system" };
       modified = true;
-      console.log(`[session-id] Dropped ${firstValidIndex} messages until valid user/system msg`);
     }
   }
 
-  // 1) Remove tool and toolResult messages - Mistral doesn't support them
+  // 2) Remove tool and toolResult messages - Mistral doesn't support them
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "tool" || messages[i].role === "toolResult") {
       messages.splice(i, 1);
-      modified = true;
-    }
-  }
-
-  // 2) Role fix: Mistral doesn't support "developer" → convert to "system"
-  for (let i = 0; i < messages.length; i++) {
-    if (messages[i].role === "developer") {
-      messages[i] = { ...messages[i], role: "system" };
       modified = true;
     }
   }
@@ -77,20 +60,17 @@ function logRoles(msgs: any[], label: string) {
 export default function (pi: ExtensionAPI) {
   let sessionId = "";
   let needsReinject = true;
-  let afterCompact = false;
 
   // ── Session start: get session ID ──
   pi.on("session_start", async (_event: any, ctx: any) => {
     sessionId = await getOrCreateSessionId();
     ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
     needsReinject = true;
-    afterCompact = false;
   });
 
-  // ── After compact: mark that next context needs cleanup ──
+  // ── After compact: re-inject session ID on next turn ──
   pi.on("session_compact", async () => {
     needsReinject = true;
-    afterCompact = true;
   });
 
   // ── Context: fix messages + inject session ID ──
@@ -98,13 +78,8 @@ export default function (pi: ExtensionAPI) {
     const msgs = event.messages || [];
     const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
     
-    const { messages, modified: rolesModified } = fixMistralMessages(msgs, afterCompact);
+    const { messages, modified: rolesModified } = fixMistralMessages(msgs);
     let modified = rolesModified;
-    
-    // Reset afterCompact flag after processing
-    if (afterCompact) {
-      afterCompact = false;
-    }
     
     const rolesAfter = messages.map((m: any) => m.role).join(" → ");
     if (rolesBefore !== rolesAfter) {
@@ -114,7 +89,7 @@ export default function (pi: ExtensionAPI) {
     // 3) Inject session ID into first system message (first msg or after compact)
     if (needsReinject) {
       for (let i = 0; i < messages.length; i++) {
-        if (messages[i].role === "system" || messages[i].role === "developer") {
+        if (messages[i].role === "system" || messages[i].role === "developer" || messages[i].role === "compactionSummary") {
           const content = typeof messages[i].content === "string" ? messages[i].content : "";
           if (!content.includes("[Session-ID]")) {
             messages[i] = {
