@@ -1,6 +1,6 @@
 /**
- * pi Session ID — Deep debugging for Mistral HTTP requests
- * Dumps full HTTP request content to trace the issue
+ * pi Session ID — Mistral compatibility with proper content format
+ * Ensures all message content is in the correct array format
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
@@ -22,7 +22,7 @@ async function getOrCreateSessionId(): Promise<string> {
 }
 
 function safeString(value: any, maxLength: number = 200): string {
-  if (value === null || value === undefined) return "null";
+  if (value === null || value === undefined) return "";
   if (typeof value === 'string') return value.slice(0, maxLength);
   if (Array.isArray(value)) {
     return value.map(v => safeString(v, maxLength / 2)).join(", ").slice(0, maxLength);
@@ -31,7 +31,7 @@ function safeString(value: any, maxLength: number = 200): string {
     const str = JSON.stringify(value);
     return str.slice(0, maxLength);
   } catch {
-    return "[unserializable]";
+    return "";
   }
 }
 
@@ -55,7 +55,7 @@ function dumpMessage(msg: any, index: number, prefix: string = "") {
       content = safeString(msg.content, 200);
     }
   } catch (e) {
-    content = `[error getting content: ${e}]`;
+    content = `[error: ${e}]`;
   }
   
   const extra = [];
@@ -68,7 +68,7 @@ function dumpMessage(msg: any, index: number, prefix: string = "") {
     if (msg.command) extra.push(`command: ${safeString(msg.command, 30)}`);
     if (msg.exitCode !== undefined) extra.push(`exitCode: ${msg.exitCode}`);
   } catch (e) {
-    extra.push(`[error getting extra: ${e}]`);
+    extra.push(`[error: ${e}]`);
   }
   
   const extraStr = extra.length > 0 ? ` [${extra.join(", ")}]` : "";
@@ -77,16 +77,50 @@ function dumpMessage(msg: any, index: number, prefix: string = "") {
 
 function dumpAllMessages(msgs: any[], label: string) {
   if (!msgs || !Array.isArray(msgs)) {
-    console.log(`[session-id] ${label}: not an array, type=${typeof msgs}`);
+    console.log(`[session-id] ${label}: not an array`);
     return;
   }
   
-  console.log(`[session-id] === ${label} (${msgs.length} messages) ===`);
+  console.log(`[session-id] === ${label} (${msgs.length} msgs) ===`);
   const roles = msgs.map((m: any) => m?.role || "null").join(" → ");
   console.log(`[session-id] Roles: ${roles}`);
-  console.log(`[session-id] Message details:`);
   msgs.forEach((msg: any, idx: number) => dumpMessage(msg, idx, "[session-id]   "));
   console.log(`[session-id] === END ${label} ===`);
+}
+
+// Ensure content is always in the correct format for pi
+function ensureContentFormat(content: any): any {
+  if (content === undefined || content === null) {
+    return [];
+  }
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
+  }
+  if (Array.isArray(content)) {
+    // Ensure each item has type and text
+    return content.map(item => {
+      if (typeof item === 'string') {
+        return { type: 'text', text: item };
+      }
+      if (item && item.text !== undefined) {
+        return { type: 'text', text: String(item.text) };
+      }
+      return { type: 'text', text: JSON.stringify(item) };
+    });
+  }
+  // For objects, try to extract text
+  if (typeof content === 'object') {
+    if (content.text !== undefined) {
+      return [{ type: 'text', text: String(content.text) }];
+    }
+    if (content.summary !== undefined) {
+      return [{ type: 'text', text: String(content.summary) }];
+    }
+    if (content.output !== undefined) {
+      return [{ type: 'text', text: String(content.output) }];
+    }
+  }
+  return [{ type: 'text', text: JSON.stringify(content) }];
 }
 
 function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean): { messages: any[]; modified: boolean } {
@@ -99,14 +133,14 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
   if (needsReinject) {
     const hasSessionIdMsg = messages.some((m: any) => 
       m?.role === "system" && 
-      typeof m.content === "string" && 
-      m.content.includes(`[Session-ID: ${sessionId}]`)
+      Array.isArray(m.content) && 
+      m.content.some((c: any) => c.text && c.text.includes(`[Session-ID: ${sessionId}]`))
     );
     
     if (!hasSessionIdMsg) {
       messages.unshift({
         role: "system",
-        content: `[Session-ID: ${sessionId}]`,
+        content: [{ type: 'text', text: `[Session-ID: ${sessionId}]` }],
       });
       modified = true;
     }
@@ -122,7 +156,7 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
       messages[i] = { 
         ...m, 
         role: "system",
-        content: safeString(m.content || m.summary || "", 10000)
+        content: ensureContentFormat(m.content || m.summary || ""),
       };
       modified = true;
     }
@@ -131,7 +165,7 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
       messages[i] = { 
         ...m, 
         role: "assistant",
-        content: safeString(m.content || m.output || m.summary || m.text || "", 10000)
+        content: ensureContentFormat(m.content || m.output || m.summary || m.text || ""),
       };
       modified = true;
     }
@@ -140,11 +174,16 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
   // 3) Clean up consecutive system messages (keep first)
   for (let i = 1; i < messages.length; i++) {
     if (messages[i]?.role === "system" && messages[i-1]?.role === "system") {
-      if (messages[i-1].content && messages[i-1].content.includes("[Session-ID:")) {
+      const prevHasSessionId = Array.isArray(messages[i-1].content) && 
+        messages[i-1].content.some((c: any) => c.text && c.text.includes("[Session-ID:"));
+      const currHasSessionId = Array.isArray(messages[i].content) && 
+        messages[i].content.some((c: any) => c.text && c.text.includes("[Session-ID:"));
+      
+      if (prevHasSessionId) {
         messages.splice(i, 1);
         modified = true;
         i--;
-      } else if (messages[i].content && messages[i].content.includes("[Session-ID:")) {
+      } else if (currHasSessionId) {
         messages.splice(i-1, 1);
         modified = true;
         i--;
@@ -174,7 +213,7 @@ export default function (pi: ExtensionAPI) {
   // ── Session compact ──
   pi.on("session_compact", async () => {
     needsReinject = true;
-    console.log(`[session-id] COMPACT - will re-inject session ID`);
+    console.log(`[session-id] COMPACT`);
   });
 
   // ── Context: clean and dump ──
@@ -265,16 +304,6 @@ export default function (pi: ExtensionAPI) {
         console.log(`[session-id] Request method: ${event.request.method || 'N/A'}`);
         if (event.request.body) {
           console.log(`[session-id] Request body: ${safeString(event.request.body, 2000)}`);
-        }
-        if (event.request.headers) {
-          console.log(`[session-id] Request headers: ${safeString(event.request.headers)}`);
-        }
-      }
-      
-      if (event.response) {
-        console.log(`[session-id] Response status: ${event.response.status || 'N/A'}`);
-        if (event.response.body) {
-          console.log(`[session-id] Response body: ${safeString(event.response.body, 1000)}`);
         }
       }
     }
