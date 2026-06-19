@@ -1,13 +1,6 @@
 /**
- * pi Session ID — Mistral compatibility layer.
- * 
- * Strategy: Convert ALL non-standard roles to Mistral-compatible roles
- * Mistral only accepts: system, user, assistant, tool (in specific format)
- * 
- * We convert:
- * - tool, toolResult, bashExecution → assistant (safe, Mistral accepts this)
- * - compactionSummary, developer → system (safe, Mistral accepts this)
- * - Add session ID as first system message
+ * pi Session ID — Deep debugging for Mistral HTTP requests
+ * Dumps full HTTP request content to trace the issue
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
@@ -26,6 +19,41 @@ async function getOrCreateSessionId(): Promise<string> {
     await fs.writeFile(sessionIdPath(), id, "utf-8");
     return id;
   }
+}
+
+function dumpMessage(msg: any, index: number, prefix: string = "") {
+  const role = msg.role || "unknown";
+  let content: string;
+  
+  if (typeof msg.content === 'string') {
+    content = msg.content.slice(0, 200);
+  } else if (Array.isArray(msg.content)) {
+    content = msg.content.map((c: any) => 
+      c.text ? c.text.slice(0, 100) : JSON.stringify(c).slice(0, 100)
+    ).join(" | ").slice(0, 200);
+  } else {
+    content = JSON.stringify(msg.content).slice(0, 200);
+  }
+  
+  const extra = [];
+  if (msg.toolCallId) extra.push(`toolCallId: ${msg.toolCallId}`);
+  if (msg.toolName) extra.push(`toolName: ${msg.toolName}`);
+  if (msg.summary) extra.push(`summary: ${msg.summary.slice(0, 50)}`);
+  if (msg.output) extra.push(`output: ${msg.output.slice(0, 50)}`);
+  if (msg.excludeFromContext) extra.push(`excludeFromContext: true`);
+  
+  const extraStr = extra.length > 0 ? ` [${extra.join(", ")}]` : "";
+  console.log(`${prefix}[${index}] ${role}: ${content}${extraStr}`);
+}
+
+function dumpAllMessages(msgs: any[], label: string) {
+  console.log(`[session-id] === ${label} ===`);
+  console.log(`[session-id] Total messages: ${msgs.length}`);
+  const roles = msgs.map((m: any) => m.role).join(" → ");
+  console.log(`[session-id] Roles: ${roles}`);
+  console.log(`[session-id] Message details:`);
+  msgs.forEach((msg: any, idx: number) => dumpMessage(msg, idx, "[session-id]   "));
+  console.log(`[session-id] === END ${label} ===`);
 }
 
 function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean): { messages: any[]; modified: boolean } {
@@ -53,25 +81,25 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     
-    // Convert to system: compactionSummary, developer
+    // Convert to system
     if (m.role === "compactionSummary" || m.role === "developer") {
       messages[i] = { 
         ...m, 
         role: "system",
         content: typeof m.content === 'string' ? m.content : 
                  Array.isArray(m.content) ? m.content : 
-                 JSON.stringify(m.content)
+                 (m.summary || JSON.stringify(m.content))
       };
       modified = true;
     }
-    // Convert to assistant: tool, toolResult, bashExecution
+    // Convert to assistant
     else if (m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution") {
       messages[i] = { 
         ...m, 
         role: "assistant",
         content: typeof m.content === 'string' ? m.content : 
                  Array.isArray(m.content) ? m.content : 
-                 (m.summary || m.output || m.text || JSON.stringify(m.content))
+                 (m.output || m.summary || m.text || JSON.stringify(m.content))
       };
       modified = true;
     }
@@ -96,30 +124,6 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
     }
   }
 
-  // 4) Clean up consecutive assistant messages
-  // Keep only the last one in a sequence (preserves tool output)
-  for (let i = messages.length - 2; i >= 0; i--) {
-    if (messages[i].role === "assistant" && messages[i+1].role === "assistant") {
-      // Check if either is a converted tool message
-      const currentIsTool = messages[i].toolCallId || messages[i].toolName || messages[i].output;
-      const nextIsTool = messages[i+1].toolCallId || messages[i+1].toolName || messages[i+1].output;
-      
-      // Keep tool-related assistant messages, remove others
-      if (!currentIsTool && !nextIsTool) {
-        messages.splice(i, 1);
-        modified = true;
-      } else if (!currentIsTool && nextIsTool) {
-        messages.splice(i, 1);
-        modified = true;
-      } else if (currentIsTool && !nextIsTool) {
-        messages.splice(i+1, 1);
-        modified = true;
-        i--; // Re-check this position
-      }
-      // If both are tool-related, keep both
-    }
-  }
-
   return { messages, modified };
 }
 
@@ -141,19 +145,23 @@ export default function (pi: ExtensionAPI) {
     console.log(`[session-id] COMPACT - will re-inject session ID`);
   });
 
-  // ── Context: clean for display ──
+  // ── Context: clean and dump ──
   pi.on("context", async (event: any, ctx: any) => {
     const msgs = event.messages || [];
-    const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
+    
+    // Dump BEFORE cleaning
+    if (msgs.length > 0 && msgs.some((m: any) => 
+      m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution" || 
+      m.role === "compactionSummary" || m.role === "developer"
+    )) {
+      dumpAllMessages(msgs, "CONTEXT BEFORE CLEAN");
+    }
     
     const { messages, modified } = cleanForMistral(msgs, sessionId, needsReinject);
     
-    const rolesAfter = messages.map((m: any) => m.role).join(" → ");
-    
+    // Dump AFTER cleaning if modified
     if (modified) {
-      console.log(`[session-id] CONTEXT FIX:`);
-      console.log(`[session-id]   BEFORE: ${rolesBefore}`);
-      console.log(`[session-id]   AFTER:  ${rolesAfter}`);
+      dumpAllMessages(messages, "CONTEXT AFTER CLEAN");
     }
 
     if (needsReinject) {
@@ -163,57 +171,106 @@ export default function (pi: ExtensionAPI) {
     return modified ? { messages } : undefined;
   });
 
-  // ── before_provider_request: clean before sending to provider (CRITICAL) ──
+  // ── before_provider_request: clean and dump (CRITICAL) ──
   pi.on("before_provider_request", async (event: any) => {
     const msgs = event.messages || [];
-    const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
+    
+    // Dump BEFORE cleaning
+    if (msgs.length > 0 && msgs.some((m: any) => 
+      m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution" || 
+      m.role === "compactionSummary" || m.role === "developer"
+    )) {
+      dumpAllMessages(msgs, "BEFORE_PROVIDER_REQUEST BEFORE CLEAN");
+    }
     
     const { messages, modified } = cleanForMistral(msgs, sessionId, false);
     
-    const rolesAfter = messages.map((m: any) => m.role).join(" → ");
-    
+    // Dump AFTER cleaning if modified
     if (modified) {
-      console.log(`[session-id] BEFORE_PROVIDER_REQUEST FIX:`);
-      console.log(`[session-id]   BEFORE: ${rolesBefore}`);
-      console.log(`[session-id]   AFTER:  ${rolesAfter}`);
+      dumpAllMessages(messages, "BEFORE_PROVIDER_REQUEST AFTER CLEAN");
     }
     
     return modified ? { messages } : undefined;
   });
 
-  // ── model_request: also clean at API level ──
+  // ── model_request: clean and dump ──
   pi.on("model_request", async (event: any) => {
     const msgs = event.messages || [];
-    const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
+    
+    // Dump BEFORE cleaning
+    if (msgs.length > 0 && msgs.some((m: any) => 
+      m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution" || 
+      m.role === "compactionSummary" || m.role === "developer"
+    )) {
+      dumpAllMessages(msgs, "MODEL_REQUEST BEFORE CLEAN");
+    }
     
     const { messages, modified } = cleanForMistral(msgs, sessionId, false);
     
-    const rolesAfter = messages.map((m: any) => m.role).join(" → ");
-    
+    // Dump AFTER cleaning if modified
     if (modified) {
-      console.log(`[session-id] MODEL_REQUEST FIX:`);
-      console.log(`[session-id]   BEFORE: ${rolesBefore}`);
-      console.log(`[session-id]   AFTER:  ${rolesAfter}`);
+      dumpAllMessages(messages, "MODEL_REQUEST AFTER CLEAN");
     }
     
     return modified ? { messages } : undefined;
   });
 
-  // ── Error handling ──
+  // ── Dump ALL events to see what's happening ──
+  const allEvents = [
+    "session_start",
+    "session_compact", 
+    "context",
+    "before_provider_request",
+    "model_request",
+    "model_error",
+    "turn_start",
+    "turn_end",
+    "tool_call",
+    "tool_result",
+  ];
+
+  for (const eventName of allEvents) {
+    pi.on(eventName, async (event: any) => {
+      // Only log events with messages
+      if (event && event.messages && Array.isArray(event.messages)) {
+        const hasProblems = event.messages.some((m: any) => 
+          m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution" || 
+          m.role === "compactionSummary" || m.role === "developer"
+        );
+        
+        if (hasProblems) {
+          console.log(`[session-id] EVENT: ${eventName} - has problematic roles`);
+          dumpAllMessages(event.messages, `${eventName} RAW`);
+        }
+      }
+    });
+  }
+
+  // ── Error handling: dump everything ──
   pi.on("model_error", async (event: any) => {
     if (event.error && event.error.statusCode === 400) {
-      const errorMsg = event.error.message || String(event.error);
-      const messages = event.messages || [];
-      const roles = messages.map((m: any) => m.role).join(" → ");
-      
       console.log(`[session-id] === 400 ERROR ===`);
-      console.log(`[session-id] Error: ${errorMsg}`);
-      console.log(`[session-id] Roles: ${roles}`);
+      console.log(`[session-id] Error: ${event.error.message || String(event.error)}`);
+      console.log(`[session-id] Status: ${event.error.statusCode}`);
       
-      // Check for any remaining problematic roles
-      const hasTool = messages.some((m: any) => m.role === "tool");
-      const hasToolResult = messages.some((m: any) => m.role === "toolResult");
-      console.log(`[session-id] Has tool: ${hasTool}, Has toolResult: ${hasToolResult}`);
+      if (event.messages) {
+        dumpAllMessages(event.messages, "MESSAGES AT ERROR");
+      }
+      
+      if (event.request) {
+        console.log(`[session-id] Request URL: ${event.request.url}`);
+        console.log(`[session-id] Request method: ${event.request.method}`);
+        if (event.request.body) {
+          console.log(`[session-id] Request body: ${JSON.stringify(event.request.body).slice(0, 1000)}`);
+        }
+      }
+      
+      if (event.response) {
+        console.log(`[session-id] Response status: ${event.response.status}`);
+        if (event.response.body) {
+          console.log(`[session-id] Response body: ${JSON.stringify(event.response.body).slice(0, 500)}`);
+        }
+      }
     }
   });
 }
