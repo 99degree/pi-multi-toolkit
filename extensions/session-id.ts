@@ -1,6 +1,14 @@
 /**
- * pi Session ID — HTTP-level interception for Mistral
- * Monkey-patches fetch to intercept and fix HTTP requests to Mistral
+ * pi Session ID — Two-stage fix for Mistral compatibility
+ * 
+ * Stage 1: Always inject session ID as first system message
+ *   - Trigger: session_start, session_compact
+ *   - Purpose: Provide session context to Mistral
+ * 
+ * Stage 2: Role normalization (only after 400 error)
+ *   - Trigger: model_error with statusCode 400
+ *   - Purpose: Fix role issues that Mistral rejects
+ *   - Actions: Convert tool→assistant, compactionSummary→system, remove toolCall objects
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
@@ -21,297 +29,281 @@ async function getOrCreateSessionId(): Promise<string> {
   }
 }
 
-// Store original fetch
-let originalFetch: typeof fetch;
+// ============================================================================
+// Stage 1: Session ID Injection (always applied)
+// ============================================================================
 
-function sanitizeMistralMessages(body: any): any {
-  if (!body || typeof body !== 'object') return body;
+function injectSessionId(msgs: any[], sessionId: string): { messages: any[]; modified: boolean } {
+  if (!msgs || !Array.isArray(msgs)) return { messages: msgs || [], modified: false };
   
-  // Clone to avoid modifying original
-  const newBody = { ...body };
+  // Check if session ID already exists
+  const hasSessionId = msgs.some((m: any) => 
+    m?.role === "system" && 
+    Array.isArray(m.content) && 
+    m.content.some((c: any) => c.type === 'text' && c.text?.includes(`[Session-ID: ${sessionId}]`))
+  );
   
-  // Check if body has messages array
-  if (newBody.messages && Array.isArray(newBody.messages)) {
-    const messages = newBody.messages;
-    let modified = false;
-    
-    // 1. Add session ID as first system message if not present
-    const sessionId = getOrCreateSessionId();
-    const hasSessionId = messages.some((m: any) => 
-      m.role === 'system' && 
-      Array.isArray(m.content) && 
-      m.content.some((c: any) => c.type === 'text' && c.text?.includes(`[Session-ID: ${sessionId}]`))
-    );
-    
-    if (!hasSessionId) {
-      messages.unshift({
-        role: 'system',
+  if (!hasSessionId) {
+    const messages = [
+      {
+        role: "system",
         content: [{ type: 'text', text: `[Session-ID: ${sessionId}]` }],
-      });
-      modified = true;
-    }
-    
-    // 2. Remove ALL tool-related messages and toolCall objects
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (!m) continue;
-      
-      // Remove messages with tool-related roles
-      if (m.role === 'tool' || m.role === 'toolResult') {
-        messages.splice(i, 1);
-        modified = true;
-        continue;
-      }
-      
-      // Remove toolCall objects from content arrays
-      if (Array.isArray(m.content)) {
-        m.content = m.content.filter((c: any) => c.type !== 'toolCall');
-        if (m.content.length === 0) {
-          m.content = [{ type: 'text', text: '' }];
-        }
-        modified = true;
-      }
-      
-      // Convert compactionSummary and developer to system
-      if (m.role === 'compactionSummary' || m.role === 'developer') {
-        m.role = 'system';
-        modified = true;
-      }
-      
-      // Convert bashExecution to assistant
-      if (m.role === 'bashExecution') {
-        m.role = 'assistant';
-        modified = true;
-      }
-    }
-    
-    // 3. Clean up consecutive system messages
-    for (let i = 1; i < messages.length; i++) {
-      if (messages[i]?.role === 'system' && messages[i-1]?.role === 'system') {
-        const prevHasSessionId = Array.isArray(messages[i-1].content) && 
-          messages[i-1].content.some((c: any) => c.type === 'text' && c.text?.includes('[Session-ID:'));
-        if (prevHasSessionId) {
-          messages.splice(i, 1);
-          modified = true;
-          i--;
-        }
-      }
-    }
-    
-    if (modified) {
-      console.log(`[session-id] HTTP FIX APPLIED`);
-      console.log(`[session-id] Messages: ${messages.length}`);
-      const roles = messages.map((m: any) => m.role).join(' → ');
-      console.log(`[session-id] Roles: ${roles}`);
-    }
-    
-    newBody.messages = messages;
+      },
+      ...msgs,
+    ];
+    return { messages, modified: true };
   }
   
-  return newBody;
+  return { messages: msgs, modified: false };
 }
 
-function createPatchedFetch(): typeof fetch {
-  return async function(url: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    const urlStr = typeof url === 'string' ? url : url.toString();
+// ============================================================================
+// Stage 2: Role Normalization (only after 400 error)
+// ============================================================================
+
+let applyRoleFix = false;
+
+function normalizeRoles(msgs: any[]): { messages: any[]; modified: boolean } {
+  if (!applyRoleFix || !msgs || !Array.isArray(msgs)) {
+    return { messages: msgs || [], modified: false };
+  }
+  
+  let modified = false;
+  let messages = [...msgs];
+  
+  // Convert compactionSummary and developer to system
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (!m) continue;
     
-    // Only intercept Mistral API calls
-    if (urlStr.includes('mistral') || urlStr.includes('nvidia')) {
-      console.log(`[session-id] HTTP REQUEST to: ${urlStr}`);
-      
-      // Check if it's a POST request with JSON body
-      if (init && init.method === 'POST' && init.body) {
-        try {
-          // Try to parse the body
-          let body: any;
-          if (typeof init.body === 'string') {
-            body = JSON.parse(init.body);
-          } else if (init.body instanceof ReadableStream) {
-            // Can't easily read stream, skip
-            console.log(`[session-id] Body is stream, cannot modify`);
-            return originalFetch(url, init);
-          } else {
-            body = init.body;
-          }
-          
-          // Check if body has messages
-          if (body && body.messages && Array.isArray(body.messages)) {
-            const rolesBefore = body.messages.map((m: any) => m.role).join(' → ');
-            console.log(`[session-id] HTTP BEFORE FIX: ${rolesBefore}`);
-            
-            // Fix the body
-            const fixedBody = sanitizeMistralMessages(body);
-            
-            const rolesAfter = fixedBody.messages?.map((m: any) => m.role).join(' → ');
-            console.log(`[session-id] HTTP AFTER FIX: ${rolesAfter}`);
-            
-            // Create new request with fixed body
-            const newInit: RequestInit = { ...init };
-            if (typeof init.body === 'string') {
-              newInit.body = JSON.stringify(fixedBody);
-            } else {
-              newInit.body = fixedBody;
-            }
-            
-            console.log(`[session-id] Sending fixed request`);
-            return originalFetch(url, newInit);
-          }
-        } catch (e) {
-          console.log(`[session-id] Error parsing body: ${e}`);
-        }
+    if (m.role === "compactionSummary" || m.role === "developer") {
+      messages[i] = { 
+        ...m, 
+        role: "system",
+        content: ensureContentFormat(m.content || m.summary || ""),
+      };
+      modified = true;
+    }
+  }
+  
+  // Convert tool, toolResult, bashExecution to assistant and remove toolCall objects
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (!m) continue;
+    
+    if (m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution") {
+      messages[i] = { 
+        ...m, 
+        role: "assistant",
+        content: sanitizeContent(m.content || m.output || m.summary || ""),
+      };
+      modified = true;
+    } else if (m.role === "assistant" && Array.isArray(m.content)) {
+      const hasToolCall = m.content.some((c: any) => c.type === 'toolCall');
+      if (hasToolCall) {
+        messages[i] = { 
+          ...m, 
+          content: sanitizeContent(m.content),
+        };
+        modified = true;
       }
     }
-    
-    // For non-Mistral requests or if we couldn't modify, use original fetch
-    return originalFetch(url, init);
-  };
+  }
+  
+  // Clean up consecutive system messages
+  for (let i = 1; i < messages.length; i++) {
+    if (messages[i]?.role === "system" && messages[i-1]?.role === "system") {
+      const prevHasSessionId = Array.isArray(messages[i-1].content) && 
+        messages[i-1].content.some((c: any) => c.type === 'text' && c.text?.includes('[Session-ID:'));
+      if (prevHasSessionId) {
+        messages.splice(i, 1);
+        modified = true;
+        i--;
+      }
+    }
+  }
+  
+  if (modified) {
+    console.log(`[session-id] Role normalization applied`);
+    const roles = messages.map((m: any) => m.role).join(' → ');
+    console.log(`[session-id] Roles after fix: ${roles}`);
+  }
+  
+  return { messages, modified };
 }
 
-export default function (pi: ExtensionAPI) {
-  let sessionId: string;
-  let needsReinject = true;
+// ============================================================================
+// Helper functions
+// ============================================================================
 
-  // ── Session start ──
+function ensureContentFormat(content: any): any {
+  if (content === undefined || content === null) {
+    return [];
+  }
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
+  }
+  if (Array.isArray(content)) {
+    return content.map(item => {
+      if (typeof item === 'string') {
+        return { type: 'text', text: item };
+      }
+      if (item && item.text !== undefined) {
+        return { type: 'text', text: String(item.text) };
+      }
+      return { type: 'text', text: JSON.stringify(item) };
+    });
+  }
+  if (typeof content === 'object') {
+    if (content.text !== undefined) {
+      return [{ type: 'text', text: String(content.text) }];
+    }
+    if (content.summary !== undefined) {
+      return [{ type: 'text', text: String(content.summary) }];
+    }
+    if (content.output !== undefined) {
+      return [{ type: 'text', text: String(content.output) }];
+    }
+  }
+  return [{ type: 'text', text: JSON.stringify(content) }];
+}
+
+function sanitizeContent(content: any): any {
+  if (content === undefined || content === null) {
+    return [];
+  }
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
+  }
+  if (Array.isArray(content)) {
+    // Filter out toolCall objects, keep only text
+    return content
+      .filter((item: any) => item.type !== 'toolCall')
+      .map((item: any) => {
+        if (typeof item === 'string') {
+          return { type: 'text', text: item };
+        }
+        if (item && item.text !== undefined) {
+          return { type: 'text', text: String(item.text) };
+        }
+        return { type: 'text', text: JSON.stringify(item) };
+      });
+  }
+  if (typeof content === 'object') {
+    if (content.text !== undefined) {
+      return [{ type: 'text', text: String(content.text) }];
+    }
+    if (content.summary !== undefined) {
+      return [{ type: 'text', text: String(content.summary) }];
+    }
+    if (content.output !== undefined) {
+      return [{ type: 'text', text: String(content.output) }];
+    }
+  }
+  return [{ type: 'text', text: JSON.stringify(content) }];
+}
+
+// ============================================================================
+// Extension
+// ============================================================================
+
+export default function (pi: ExtensionAPI) {
+  let sessionId = "";
+  let needsSessionIdInjection = true;
+
+  // ── Session start: get session ID and inject it ──
   pi.on("session_start", async (_event: any, ctx: any) => {
     sessionId = await getOrCreateSessionId();
     ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
-    needsReinject = true;
-    
-    // Monkey-patch fetch for HTTP-level interception
-    if (!originalFetch) {
-      originalFetch = globalThis.fetch;
-      globalThis.fetch = createPatchedFetch();
-      console.log(`[session-id] Fetch patched for HTTP interception`);
-    }
-    
+    needsSessionIdInjection = true;
+    applyRoleFix = false; // Reset role fix flag on new session
     console.log(`[session-id] SESSION START - ID: ${sessionId}`);
   });
 
-  // ── Session compact ──
+  // ── Session compact: mark for session ID re-injection ──
   pi.on("session_compact", async () => {
-    needsReinject = true;
-    console.log(`[session-id] COMPACT`);
+    needsSessionIdInjection = true;
+    console.log(`[session-id] COMPACT - will re-inject session ID`);
   });
 
-  // ── Clean at context level too (belt and suspenders) ──
+  // ── Model error: enable role fix on next request ──
+  pi.on("model_error", async (event: any) => {
+    if (event?.error?.statusCode === 400) {
+      applyRoleFix = true;
+      console.log(`[session-id] 400 ERROR detected - will apply role fix on next request`);
+      console.log(`[session-id] Error: ${event.error.message || String(event.error)}`);
+    }
+  });
+
+  // ── Context: apply both fixes ──
   pi.on("context", async (event: any, ctx: any) => {
     const msgs = event?.messages;
     if (!msgs || !Array.isArray(msgs)) return;
     
-    // Check for toolCall objects in content
-    const hasToolCalls = msgs.some((m: any) => 
-      Array.isArray(m.content) && m.content.some((c: any) => c.type === 'toolCall')
-    );
-    
-    if (hasToolCalls) {
-      console.log(`[session-id] CONTEXT has toolCall objects`);
-    }
-    
-    // Clean toolCall objects from assistant messages
+    let messages = [...msgs];
     let modified = false;
-    const messages = msgs.map((m: any) => {
-      if (m && Array.isArray(m.content)) {
-        const hasToolCall = m.content.some((c: any) => c.type === 'toolCall');
-        if (hasToolCall) {
-          modified = true;
-          return {
-            ...m,
-            content: m.content.filter((c: any) => c.type !== 'toolCall')
-          };
-        }
-      }
-      return m;
-    }).filter(Boolean);
     
-    if (modified) {
-      console.log(`[session-id] CONTEXT cleaned toolCall objects`);
+    // Stage 1: Always inject session ID if needed
+    if (needsSessionIdInjection) {
+      const { messages: newMessages, modified: sessionIdModified } = injectSessionId(messages, sessionId);
+      messages = newMessages;
+      modified = sessionIdModified;
+      needsSessionIdInjection = false;
     }
     
-    if (needsReinject) {
-      needsReinject = false;
+    // Stage 2: Apply role normalization if triggered by 400
+    if (applyRoleFix) {
+      const { messages: newMessages, modified: roleModified } = normalizeRoles(messages);
+      messages = newMessages;
+      modified = modified || roleModified;
+      applyRoleFix = false; // Reset after applying
     }
-
+    
     return modified ? { messages } : undefined;
   });
 
-  // ── before_provider_request ──
+  // ── before_provider_request: apply both fixes ──
   pi.on("before_provider_request", async (event: any) => {
     const msgs = event?.messages;
     if (!msgs || !Array.isArray(msgs)) return;
     
-    // Clean toolCall objects
+    let messages = [...msgs];
     let modified = false;
-    const messages = msgs.map((m: any) => {
-      if (m && Array.isArray(m.content)) {
-        const hasToolCall = m.content.some((c: any) => c.type === 'toolCall');
-        if (hasToolCall) {
-          modified = true;
-          return {
-            ...m,
-            content: m.content.filter((c: any) => c.type !== 'toolCall')
-          };
-        }
-      }
-      return m;
-    }).filter(Boolean);
     
-    if (modified) {
-      console.log(`[session-id] BEFORE_PROVIDER_REQUEST cleaned toolCall objects`);
+    // Stage 1: Inject session ID (should already be done, but just in case)
+    if (needsSessionIdInjection) {
+      const { messages: newMessages, modified: sessionIdModified } = injectSessionId(messages, sessionId);
+      messages = newMessages;
+      modified = sessionIdModified;
+      needsSessionIdInjection = false;
+    }
+    
+    // Stage 2: Apply role normalization if triggered by 400
+    if (applyRoleFix) {
+      const { messages: newMessages, modified: roleModified } = normalizeRoles(messages);
+      messages = newMessages;
+      modified = modified || roleModified;
+      applyRoleFix = false; // Reset after applying
     }
     
     return modified ? { messages } : undefined;
   });
 
-  // ── model_request ──
+  // ── model_request: apply both fixes (belt and suspenders) ──
   pi.on("model_request", async (event: any) => {
     const msgs = event?.messages;
     if (!msgs || !Array.isArray(msgs)) return;
     
-    // Clean toolCall objects
+    let messages = [...msgs];
     let modified = false;
-    const messages = msgs.map((m: any) => {
-      if (m && Array.isArray(m.content)) {
-        const hasToolCall = m.content.some((c: any) => c.type === 'toolCall');
-        if (hasToolCall) {
-          modified = true;
-          return {
-            ...m,
-            content: m.content.filter((c: any) => c.type !== 'toolCall')
-          };
-        }
-      }
-      return m;
-    }).filter(Boolean);
     
-    if (modified) {
-      console.log(`[session-id] MODEL_REQUEST cleaned toolCall objects`);
+    if (applyRoleFix) {
+      const { messages: newMessages, modified: roleModified } = normalizeRoles(messages);
+      messages = newMessages;
+      modified = roleModified;
+      applyRoleFix = false;
     }
     
     return modified ? { messages } : undefined;
-  });
-
-  // ── Error handling ──
-  pi.on("model_error", async (event: any) => {
-    if (event?.error?.statusCode === 400) {
-      console.log(`[session-id] 400 ERROR: ${event.error.message || String(event.error)}`);
-      
-      if (event.request) {
-        console.log(`[session-id] Request URL: ${event.request.url || 'N/A'}`);
-        if (event.request.body) {
-          try {
-            const body = typeof event.request.body === 'string' 
-              ? JSON.parse(event.request.body) 
-              : event.request.body;
-            if (body.messages) {
-              const roles = body.messages.map((m: any) => m.role).join(' → ');
-              console.log(`[session-id] Request body roles: ${roles}`);
-              console.log(`[session-id] Request body: ${JSON.stringify(body).slice(0, 1000)}`);
-            }
-          } catch (e) {
-            console.log(`[session-id] Error parsing request body: ${e}`);
-          }
-        }
-      }
-    }
   });
 }
