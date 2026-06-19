@@ -1,6 +1,18 @@
 /**
  * pi Session ID — Mistral compatibility layer.
- * hooks into EVERY event that might contain messages
+ * 
+ * The issue: pi's convertToLlm() converts internal messages to LLM format:
+ * - bashExecution -> user (unless excludeFromContext=true)
+ * - compactionSummary -> user
+ * - toolResult -> toolResult (kept as-is)
+ * 
+ * Mistral rejects: tool -> user sequence
+ * 
+ * Solution: 
+ * 1. Mark bashExecution as excludeFromContext=true
+ * 2. Convert compactionSummary to system role BEFORE convertToLlm
+ * 3. Remove toolResult messages BEFORE convertToLlm
+ * 4. Add session ID as system message
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
@@ -19,16 +31,6 @@ async function getOrCreateSessionId(): Promise<string> {
     await fs.writeFile(sessionIdPath(), id, "utf-8");
     return id;
   }
-}
-
-function hasProblematicRoles(msgs: any[]): boolean {
-  const problematic = new Set(["tool", "toolResult", "bashExecution", "compactionSummary", "developer"]);
-  for (const m of msgs) {
-    if (problematic.has(m.role)) return true;
-    // Also check nested content for tool-related data
-    if (m.tool_calls || m.toolCallId || m.toolName) return true;
-  }
-  return false;
 }
 
 function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean): { messages: any[]; modified: boolean } {
@@ -52,29 +54,46 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
     }
   }
 
-  // 2) Convert non-standard roles to system
+  // 2) Mark bashExecution messages as excludeFromContext
+  // This prevents convertToLlm from converting them to user messages
   for (let i = 0; i < messages.length; i++) {
-    if (messages[i].role === "compactionSummary" || messages[i].role === "developer") {
+    if (messages[i].role === "bashExecution") {
+      messages[i] = { ...messages[i], excludeFromContext: true };
+      modified = true;
+    }
+  }
+
+  // 3) Convert compactionSummary to system role
+  // convertToLlm converts compactionSummary -> user, so we convert it first
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === "compactionSummary") {
+      messages[i] = { 
+        ...messages[i], 
+        role: "system",
+        content: `Compaction Summary: ${messages[i].summary || ''}`
+      };
+      modified = true;
+    }
+  }
+
+  // 4) Convert developer to system
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === "developer") {
       messages[i] = { ...messages[i], role: "system" };
       modified = true;
     }
   }
 
-  // 3) Remove ALL tool-related messages
+  // 5) Remove toolResult messages entirely
+  // convertToLlm keeps toolResult as-is, which Mistral rejects
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution") {
-      messages.splice(i, 1);
-      modified = true;
-    }
-    // Also remove messages with tool-related fields
-    else if (m.tool_calls || m.toolCallId || m.toolName) {
+    if (messages[i].role === "toolResult") {
       messages.splice(i, 1);
       modified = true;
     }
   }
 
-  // 4) Clean up consecutive system messages
+  // 6) Clean up consecutive system messages
   for (let i = 1; i < messages.length; i++) {
     if (messages[i].role === "system" && messages[i-1].role === "system") {
       if (messages[i-1].content && messages[i-1].content.includes("[Session-ID:")) {
@@ -96,6 +115,11 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
   return { messages, modified };
 }
 
+function hasProblematicRoles(msgs: any[]): boolean {
+  const problematic = new Set(["tool", "toolResult", "bashExecution", "compactionSummary", "developer"]);
+  return msgs.some((m: any) => problematic.has(m.role));
+}
+
 function tryFix(event: any, sessionId: string, needsReinject: boolean, eventName: string): any {
   if (!event || !event.messages) return undefined;
   
@@ -103,16 +127,20 @@ function tryFix(event: any, sessionId: string, needsReinject: boolean, eventName
   if (!Array.isArray(msgs)) return undefined;
   
   const hasProblems = hasProblematicRoles(msgs);
-  if (!hasProblems) return undefined;
+  if (!hasProblems && !needsReinject) return undefined;
   
   const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
-  const { messages, modified } = cleanForMistral(msgs, sessionId, needsReinject);
+  const { messages, modified } = cleanForMistral(msgs, sessionId, needsReinject && eventName === "context");
   const rolesAfter = messages.map((m: any) => m.role).join(" → ");
   
-  if (modified) {
-    console.log(`[session-id] ${eventName} FIX:`);
+  if (modified || needsReinject) {
+    console.log(`[session-id] ${eventName} FIX (hasProblems=${hasProblems}, needsReinject=${needsReinject}):`);
     console.log(`[session-id]   BEFORE: ${rolesBefore}`);
     console.log(`[session-id]   AFTER:  ${rolesAfter}`);
+  }
+  
+  if (needsReinject && eventName === "context") {
+    return { messages, needsReinject: false };
   }
   
   return modified ? { messages } : undefined;
@@ -127,37 +155,36 @@ export default function (pi: ExtensionAPI) {
     sessionId = await getOrCreateSessionId();
     ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
     needsReinject = true;
-    console.log(`[session-id] SESSION START]`);
+    console.log(`[session-id] SESSION START - ID: ${sessionId}`);
   });
 
   // ── Session compact ──
   pi.on("session_compact", async () => {
     needsReinject = true;
-    console.log(`[session-id] COMPACT]`);
+    console.log(`[session-id] COMPACT - will re-inject session ID`);
   });
 
-  // ── Hook into ALL possible events that might contain messages ──
+  // ── Hook into ALL message events ──
   const messageEvents = [
     "context",
     "model_request", 
     "before_provider_request",
     "before_model_call",
-    "after_provider_response",
+    "session_before_compact",
     "turn_start",
     "turn_end",
-    "tool_call",
-    "tool_result",
   ];
 
   for (const eventName of messageEvents) {
     pi.on(eventName, async (event: any) => {
-      const result = tryFix(event, sessionId, needsReinject && eventName === "context", eventName);
-      if (result) {
-        if (eventName === "context" && needsReinject) {
-          needsReinject = false;
-        }
-        return result;
+      const isContext = eventName === "context";
+      const result = tryFix(event, sessionId, needsReinject && isContext, eventName);
+      
+      if (result && isContext) {
+        needsReinject = false;
       }
+      
+      return result;
     });
   }
 
@@ -168,6 +195,12 @@ export default function (pi: ExtensionAPI) {
       if (event.messages) {
         const roles = event.messages.map((m: any) => m.role).join(" → ");
         console.log(`[session-id] Roles at error: ${roles}`);
+        console.log(`[session-id] Message count: ${event.messages.length}`);
+        
+        // Check if messages have been converted
+        const hasTool = event.messages.some((m: any) => m.role === "tool");
+        const hasToolResult = event.messages.some((m: any) => m.role === "toolResult");
+        console.log(`[session-id] Has tool: ${hasTool}, Has toolResult: ${hasToolResult}`);
       }
     }
   });
