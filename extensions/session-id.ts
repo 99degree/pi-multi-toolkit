@@ -2,7 +2,7 @@
  * pi Session ID — session tracking with error recovery.
  *
  * Responsibilities:
- * 1. Inject [Session-ID] into system prompt on first message and after compact
+ * 1. Send session ID as SYSTEM message as first message to model
  * 2. Always apply Mistral role fix (developer, compactionSummary → system)
  * 3. Remove tool/toolResult messages for Mistral compatibility
  * 4. Log fixes for debugging
@@ -26,11 +26,31 @@ async function getOrCreateSessionId(): Promise<string> {
   }
 }
 
-function fixMistralMessages(msgs: any[]): { messages: any[]; modified: boolean } {
+function fixMistralMessages(msgs: any[], sessionId: string, needsReinject: boolean): { messages: any[]; modified: boolean } {
   let modified = false;
-  const messages = [...msgs]; // Work on a copy
+  let messages = [...msgs]; // Work on a copy
 
-  // 1) Role fix: Convert non-Mistral roles to system
+  // 1) If we need to inject session ID, add it as FIRST system message
+  if (needsReinject) {
+    // Check if there's already a session ID message
+    const hasSessionIdMsg = messages.some((m: any) => 
+      m.role === "system" && 
+      typeof m.content === "string" && 
+      m.content.includes(`[Session-ID: ${sessionId}]`)
+    );
+    
+    if (!hasSessionIdMsg) {
+      // Add session ID as first system message
+      messages.unshift({
+        role: "system",
+        content: `[Session-ID: ${sessionId}]`,
+      });
+      modified = true;
+      console.log(`[session-id] Added session ID as system message`);
+    }
+  }
+
+  // 2) Role fix: Convert non-Mistral roles to system
   // Mistral only supports: system, user, assistant, tool
   // But tool/toolResult will be removed below, so convert others to system
   const rolesToConvert = new Set(["developer", "compactionSummary"]);
@@ -41,7 +61,7 @@ function fixMistralMessages(msgs: any[]): { messages: any[]; modified: boolean }
     }
   }
 
-  // 2) Remove tool and toolResult messages - Mistral doesn't support them
+  // 3) Remove tool and toolResult messages - Mistral doesn't support them
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "tool" || messages[i].role === "toolResult") {
       messages.splice(i, 1);
@@ -73,12 +93,12 @@ export default function (pi: ExtensionAPI) {
     needsReinject = true;
   });
 
-  // ── Context: fix messages + inject session ID ──
+  // ── Context: fix messages + inject session ID as first system message ──
   pi.on("context", async (event: any, ctx: any) => {
     const msgs = event.messages || [];
     const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
     
-    const { messages, modified: rolesModified } = fixMistralMessages(msgs);
+    const { messages, modified: rolesModified } = fixMistralMessages(msgs, sessionId, needsReinject);
     let modified = rolesModified;
     
     const rolesAfter = messages.map((m: any) => m.role).join(" → ");
@@ -86,21 +106,8 @@ export default function (pi: ExtensionAPI) {
       console.log(`[session-id] context fix: ${rolesBefore} → ${rolesAfter}`);
     }
 
-    // 3) Inject session ID into first system message (first msg or after compact)
+    // Reset needsReinject after processing
     if (needsReinject) {
-      for (let i = 0; i < messages.length; i++) {
-        if (messages[i].role === "system" || messages[i].role === "developer" || messages[i].role === "compactionSummary") {
-          const content = typeof messages[i].content === "string" ? messages[i].content : "";
-          if (!content.includes("[Session-ID]")) {
-            messages[i] = {
-              ...messages[i],
-              content: `[Session-ID: ${sessionId}]\n${content}`,
-            };
-            modified = true;
-          }
-          break; // only first system message
-        }
-      }
       needsReinject = false;
     }
 
@@ -112,7 +119,7 @@ export default function (pi: ExtensionAPI) {
     const msgs = event.messages || [];
     const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
     
-    const { messages, modified } = fixMistralMessages(msgs);
+    const { messages, modified } = fixMistralMessages(msgs, sessionId, false);
     
     const rolesAfter = messages.map((m: any) => m.role).join(" → ");
     if (rolesBefore !== rolesAfter) {
