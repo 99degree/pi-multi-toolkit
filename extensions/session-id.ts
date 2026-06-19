@@ -1,6 +1,6 @@
 /**
  * pi Session ID — Mistral compatibility layer.
- * Debug version with extensive logging.
+ * Fixes messages at ALL possible levels to ensure Mistral compatibility.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
@@ -55,7 +55,7 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
     }
   }
 
-  // 3) Remove ALL tool-related messages
+  // 3) Remove ALL tool-related messages (Mistral doesn't support pi's standalone tool messages)
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "tool" || messages[i].role === "toolResult" || messages[i].role === "bashExecution") {
       messages.splice(i, 1);
@@ -82,25 +82,6 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
     }
   }
 
-  // 5) Validate role sequence and remove invalid
-  for (let i = 0; i < messages.length - 1; i++) {
-    const current = messages[i];
-    const next = messages[i + 1];
-    
-    const validTransitions: Record<string, Set<string>> = {
-      system: new Set(["system", "user", "assistant"]),
-      user: new Set(["assistant", "system"]),
-      assistant: new Set(["user", "assistant", "system"]),
-    };
-    
-    const allowedNext = validTransitions[current.role];
-    if (allowedNext && !allowedNext.has(next.role)) {
-      messages.splice(i + 1, 1);
-      modified = true;
-      i--;
-    }
-  }
-
   return { messages, modified };
 }
 
@@ -113,81 +94,114 @@ export default function (pi: ExtensionAPI) {
     sessionId = await getOrCreateSessionId();
     ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
     needsReinject = true;
-    console.log(`[session-id] === SESSION START ===`);
-    console.log(`[session-id] Session ID: ${sessionId}`);
+    console.log(`[session-id] SESSION START - ID: ${sessionId}`);
   });
 
   // ── After compact: re-inject session ID on next turn ──
   pi.on("session_compact", async () => {
     needsReinject = true;
-    console.log(`[session-id] === COMPACT ===`);
-    console.log(`[session-id] Will re-inject session ID on next context`);
+    console.log(`[session-id] COMPACT - will re-inject session ID`);
   });
 
-  // ── Context: ALWAYS clean messages for Mistral ──
+  // ── Context: clean for display ──
   pi.on("context", async (event: any, ctx: any) => {
     const msgs = event.messages || [];
-    const roles = msgs.map((m: any) => m.role).join(" → ");
     const hasProblems = hasProblematicRoles(msgs);
     
-    console.log(`[session-id] context event - msg count: ${msgs.length}, has problems: ${hasProblems}`);
-    console.log(`[session-id] roles: ${roles}`);
-    console.log(`[session-id] needsReinject: ${needsReinject}`);
-    
-    const { messages, modified } = cleanForMistral(msgs, sessionId, needsReinject);
-    
-    const rolesAfter = messages.map((m: any) => m.role).join(" → ");
-    
-    if (modified) {
-      console.log(`[session-id] CLEANED:`);
-      console.log(`[session-id]   BEFORE: ${roles}`);
-      console.log(`[session-id]   AFTER:  ${rolesAfter}`);
-      console.log(`[session-id]   Removed: ${msgs.length - messages.length} messages`);
-    } else {
-      console.log(`[session-id] No changes needed`);
+    if (hasProblems) {
+      const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
+      const { messages, modified } = cleanForMistral(msgs, sessionId, needsReinject);
+      const rolesAfter = messages.map((m: any) => m.role).join(" → ");
+      
+      if (modified) {
+        console.log(`[session-id] CONTEXT FIX:`);
+        console.log(`[session-id]   BEFORE: ${rolesBefore}`);
+        console.log(`[session-id]   AFTER:  ${rolesAfter}`);
+      }
+      
+      if (needsReinject) needsReinject = false;
+      return modified ? { messages } : undefined;
     }
-
-    if (needsReinject) {
-      needsReinject = false;
-    }
-
-    return modified ? { messages } : undefined;
+    
+    if (needsReinject) needsReinject = false;
   });
 
-  // ── Model request: ALWAYS clean at API level ──
+  // ── before_provider_request: clean before sending to provider (THIS IS KEY) ──
+  pi.on("before_provider_request", async (event: any) => {
+    if (!event.messages) return;
+    
+    const msgs = event.messages;
+    const hasProblems = hasProblematicRoles(msgs);
+    
+    if (hasProblems) {
+      const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
+      const { messages, modified } = cleanForMistral(msgs, sessionId, false);
+      const rolesAfter = messages.map((m: any) => m.role).join(" → ");
+      
+      if (modified) {
+        console.log(`[session-id] BEFORE_PROVIDER_REQUEST FIX:`);
+        console.log(`[session-id]   BEFORE: ${rolesBefore}`);
+        console.log(`[session-id]   AFTER:  ${rolesAfter}`);
+      }
+      
+      return modified ? { messages } : undefined;
+    }
+  });
+
+  // ── model_request: also clean at API level ──
   pi.on("model_request", async (event: any) => {
-    const msgs = event.messages || [];
-    const roles = msgs.map((m: any) => m.role).join(" → ");
+    if (!event.messages) return;
+    
+    const msgs = event.messages;
     const hasProblems = hasProblematicRoles(msgs);
     
-    console.log(`[session-id] model_request event - msg count: ${msgs.length}, has problems: ${hasProblems}`);
-    console.log(`[session-id] roles: ${roles}`);
-    
-    const { messages, modified } = cleanForMistral(msgs, sessionId, false);
-    
-    const rolesAfter = messages.map((m: any) => m.role).join(" → ");
-    
-    if (modified) {
-      console.log(`[session-id] API CLEANED:`);
-      console.log(`[session-id]   BEFORE: ${roles}`);
-      console.log(`[session-id]   AFTER:  ${rolesAfter}`);
-    } else {
-      console.log(`[session-id] API: No changes needed`);
+    if (hasProblems) {
+      const rolesBefore = msgs.map((m: any) => m.role).join(" → ");
+      const { messages, modified } = cleanForMistral(msgs, sessionId, false);
+      const rolesAfter = messages.map((m: any) => m.role).join(" → ");
+      
+      if (modified) {
+        console.log(`[session-id] MODEL_REQUEST FIX:`);
+        console.log(`[session-id]   BEFORE: ${rolesBefore}`);
+        console.log(`[session-id]   AFTER:  ${rolesAfter}`);
+      }
+      
+      return modified ? { messages } : undefined;
     }
-    
-    return modified ? { messages } : undefined;
   });
 
-  // ── Error handling: log 400 errors ──
+  // ── tool_call: log tool calls ──
+  pi.on("tool_call", async (event: any) => {
+    console.log(`[session-id] TOOL_CALL: ${JSON.stringify(event).slice(0, 200)}`);
+  });
+
+  // ── tool_result: log tool results ──
+  pi.on("tool_result", async (event: any) => {
+    console.log(`[session-id] TOOL_RESULT: ${JSON.stringify(event).slice(0, 200)}`);
+  });
+
+  // ── turn_start: log turn start ──
+  pi.on("turn_start", async (event: any) => {
+    console.log(`[session-id] TURN_START`);
+  });
+
+  // ── turn_end: log turn end ──
+  pi.on("turn_end", async (event: any) => {
+    console.log(`[session-id] TURN_END`);
+  });
+
+  // ── Error handling ──
   pi.on("model_error", async (event: any) => {
     if (event.error && event.error.statusCode === 400) {
       const errorMsg = event.error.message || String(event.error);
       const messages = event.messages || [];
       const roles = messages.map((m: any) => m.role).join(" → ");
+      const hasProblems = hasProblematicRoles(messages);
       
       console.log(`[session-id] === 400 ERROR ===`);
       console.log(`[session-id] Error: ${errorMsg}`);
       console.log(`[session-id] Roles: ${roles}`);
+      console.log(`[session-id] Has problems: ${hasProblems}`);
       console.log(`[session-id] Message count: ${messages.length}`);
     }
   });
