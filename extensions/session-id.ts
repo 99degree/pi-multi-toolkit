@@ -21,35 +21,68 @@ async function getOrCreateSessionId(): Promise<string> {
   }
 }
 
+function safeString(value: any, maxLength: number = 200): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === 'string') return value.slice(0, maxLength);
+  if (Array.isArray(value)) {
+    return value.map(v => safeString(v, maxLength / 2)).join(", ").slice(0, maxLength);
+  }
+  try {
+    const str = JSON.stringify(value);
+    return str.slice(0, maxLength);
+  } catch {
+    return "[unserializable]";
+  }
+}
+
 function dumpMessage(msg: any, index: number, prefix: string = "") {
-  const role = msg.role || "unknown";
-  let content: string;
+  if (!msg) {
+    console.log(`${prefix}[${index}] null/undefined`);
+    return;
+  }
   
-  if (typeof msg.content === 'string') {
-    content = msg.content.slice(0, 200);
-  } else if (Array.isArray(msg.content)) {
-    content = msg.content.map((c: any) => 
-      c.text ? c.text.slice(0, 100) : JSON.stringify(c).slice(0, 100)
-    ).join(" | ").slice(0, 200);
-  } else {
-    content = JSON.stringify(msg.content).slice(0, 200);
+  const role = msg.role || "unknown";
+  let content: string = "";
+  
+  try {
+    if (typeof msg.content === 'string') {
+      content = msg.content.slice(0, 200);
+    } else if (Array.isArray(msg.content)) {
+      content = msg.content.map((c: any) => 
+        safeString(c.text || c, 100)
+      ).join(" | ").slice(0, 200);
+    } else {
+      content = safeString(msg.content, 200);
+    }
+  } catch (e) {
+    content = `[error getting content: ${e}]`;
   }
   
   const extra = [];
-  if (msg.toolCallId) extra.push(`toolCallId: ${msg.toolCallId}`);
-  if (msg.toolName) extra.push(`toolName: ${msg.toolName}`);
-  if (msg.summary) extra.push(`summary: ${msg.summary.slice(0, 50)}`);
-  if (msg.output) extra.push(`output: ${msg.output.slice(0, 50)}`);
-  if (msg.excludeFromContext) extra.push(`excludeFromContext: true`);
+  try {
+    if (msg.toolCallId) extra.push(`toolCallId: ${safeString(msg.toolCallId, 30)}`);
+    if (msg.toolName) extra.push(`toolName: ${safeString(msg.toolName, 30)}`);
+    if (msg.summary) extra.push(`summary: ${safeString(msg.summary, 50)}`);
+    if (msg.output) extra.push(`output: ${safeString(msg.output, 50)}`);
+    if (msg.excludeFromContext) extra.push(`excludeFromContext: true`);
+    if (msg.command) extra.push(`command: ${safeString(msg.command, 30)}`);
+    if (msg.exitCode !== undefined) extra.push(`exitCode: ${msg.exitCode}`);
+  } catch (e) {
+    extra.push(`[error getting extra: ${e}]`);
+  }
   
   const extraStr = extra.length > 0 ? ` [${extra.join(", ")}]` : "";
   console.log(`${prefix}[${index}] ${role}: ${content}${extraStr}`);
 }
 
 function dumpAllMessages(msgs: any[], label: string) {
-  console.log(`[session-id] === ${label} ===`);
-  console.log(`[session-id] Total messages: ${msgs.length}`);
-  const roles = msgs.map((m: any) => m.role).join(" → ");
+  if (!msgs || !Array.isArray(msgs)) {
+    console.log(`[session-id] ${label}: not an array, type=${typeof msgs}`);
+    return;
+  }
+  
+  console.log(`[session-id] === ${label} (${msgs.length} messages) ===`);
+  const roles = msgs.map((m: any) => m?.role || "null").join(" → ");
   console.log(`[session-id] Roles: ${roles}`);
   console.log(`[session-id] Message details:`);
   msgs.forEach((msg: any, idx: number) => dumpMessage(msg, idx, "[session-id]   "));
@@ -57,13 +90,15 @@ function dumpAllMessages(msgs: any[], label: string) {
 }
 
 function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean): { messages: any[]; modified: boolean } {
+  if (!msgs || !Array.isArray(msgs)) return { messages: msgs || [], modified: false };
+  
   let modified = false;
   let messages = [...msgs];
 
   // 1) Add session ID as FIRST system message if needed
   if (needsReinject) {
     const hasSessionIdMsg = messages.some((m: any) => 
-      m.role === "system" && 
+      m?.role === "system" && 
       typeof m.content === "string" && 
       m.content.includes(`[Session-ID: ${sessionId}]`)
     );
@@ -80,15 +115,14 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
   // 2) Convert ALL problematic roles to Mistral-compatible roles
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
+    if (!m) continue;
     
     // Convert to system
     if (m.role === "compactionSummary" || m.role === "developer") {
       messages[i] = { 
         ...m, 
         role: "system",
-        content: typeof m.content === 'string' ? m.content : 
-                 Array.isArray(m.content) ? m.content : 
-                 (m.summary || JSON.stringify(m.content))
+        content: safeString(m.content || m.summary || "", 10000)
       };
       modified = true;
     }
@@ -97,9 +131,7 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
       messages[i] = { 
         ...m, 
         role: "assistant",
-        content: typeof m.content === 'string' ? m.content : 
-                 Array.isArray(m.content) ? m.content : 
-                 (m.output || m.summary || m.text || JSON.stringify(m.content))
+        content: safeString(m.content || m.output || m.summary || m.text || "", 10000)
       };
       modified = true;
     }
@@ -107,7 +139,7 @@ function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean)
 
   // 3) Clean up consecutive system messages (keep first)
   for (let i = 1; i < messages.length; i++) {
-    if (messages[i].role === "system" && messages[i-1].role === "system") {
+    if (messages[i]?.role === "system" && messages[i-1]?.role === "system") {
       if (messages[i-1].content && messages[i-1].content.includes("[Session-ID:")) {
         messages.splice(i, 1);
         modified = true;
@@ -147,19 +179,20 @@ export default function (pi: ExtensionAPI) {
 
   // ── Context: clean and dump ──
   pi.on("context", async (event: any, ctx: any) => {
-    const msgs = event.messages || [];
+    const msgs = event?.messages;
+    if (!msgs || !Array.isArray(msgs)) return;
     
-    // Dump BEFORE cleaning
-    if (msgs.length > 0 && msgs.some((m: any) => 
-      m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution" || 
-      m.role === "compactionSummary" || m.role === "developer"
-    )) {
+    const hasProblems = msgs.some((m: any) => 
+      m?.role === "tool" || m?.role === "toolResult" || m?.role === "bashExecution" || 
+      m?.role === "compactionSummary" || m?.role === "developer"
+    );
+    
+    if (hasProblems) {
       dumpAllMessages(msgs, "CONTEXT BEFORE CLEAN");
     }
     
     const { messages, modified } = cleanForMistral(msgs, sessionId, needsReinject);
     
-    // Dump AFTER cleaning if modified
     if (modified) {
       dumpAllMessages(messages, "CONTEXT AFTER CLEAN");
     }
@@ -171,21 +204,22 @@ export default function (pi: ExtensionAPI) {
     return modified ? { messages } : undefined;
   });
 
-  // ── before_provider_request: clean and dump (CRITICAL) ──
+  // ── before_provider_request: clean and dump ──
   pi.on("before_provider_request", async (event: any) => {
-    const msgs = event.messages || [];
+    const msgs = event?.messages;
+    if (!msgs || !Array.isArray(msgs)) return;
     
-    // Dump BEFORE cleaning
-    if (msgs.length > 0 && msgs.some((m: any) => 
-      m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution" || 
-      m.role === "compactionSummary" || m.role === "developer"
-    )) {
+    const hasProblems = msgs.some((m: any) => 
+      m?.role === "tool" || m?.role === "toolResult" || m?.role === "bashExecution" || 
+      m?.role === "compactionSummary" || m?.role === "developer"
+    );
+    
+    if (hasProblems) {
       dumpAllMessages(msgs, "BEFORE_PROVIDER_REQUEST BEFORE CLEAN");
     }
     
     const { messages, modified } = cleanForMistral(msgs, sessionId, false);
     
-    // Dump AFTER cleaning if modified
     if (modified) {
       dumpAllMessages(messages, "BEFORE_PROVIDER_REQUEST AFTER CLEAN");
     }
@@ -195,19 +229,20 @@ export default function (pi: ExtensionAPI) {
 
   // ── model_request: clean and dump ──
   pi.on("model_request", async (event: any) => {
-    const msgs = event.messages || [];
+    const msgs = event?.messages;
+    if (!msgs || !Array.isArray(msgs)) return;
     
-    // Dump BEFORE cleaning
-    if (msgs.length > 0 && msgs.some((m: any) => 
-      m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution" || 
-      m.role === "compactionSummary" || m.role === "developer"
-    )) {
+    const hasProblems = msgs.some((m: any) => 
+      m?.role === "tool" || m?.role === "toolResult" || m?.role === "bashExecution" || 
+      m?.role === "compactionSummary" || m?.role === "developer"
+    );
+    
+    if (hasProblems) {
       dumpAllMessages(msgs, "MODEL_REQUEST BEFORE CLEAN");
     }
     
     const { messages, modified } = cleanForMistral(msgs, sessionId, false);
     
-    // Dump AFTER cleaning if modified
     if (modified) {
       dumpAllMessages(messages, "MODEL_REQUEST AFTER CLEAN");
     }
@@ -215,60 +250,31 @@ export default function (pi: ExtensionAPI) {
     return modified ? { messages } : undefined;
   });
 
-  // ── Dump ALL events to see what's happening ──
-  const allEvents = [
-    "session_start",
-    "session_compact", 
-    "context",
-    "before_provider_request",
-    "model_request",
-    "model_error",
-    "turn_start",
-    "turn_end",
-    "tool_call",
-    "tool_result",
-  ];
-
-  for (const eventName of allEvents) {
-    pi.on(eventName, async (event: any) => {
-      // Only log events with messages
-      if (event && event.messages && Array.isArray(event.messages)) {
-        const hasProblems = event.messages.some((m: any) => 
-          m.role === "tool" || m.role === "toolResult" || m.role === "bashExecution" || 
-          m.role === "compactionSummary" || m.role === "developer"
-        );
-        
-        if (hasProblems) {
-          console.log(`[session-id] EVENT: ${eventName} - has problematic roles`);
-          dumpAllMessages(event.messages, `${eventName} RAW`);
-        }
-      }
-    });
-  }
-
   // ── Error handling: dump everything ──
   pi.on("model_error", async (event: any) => {
-    if (event.error && event.error.statusCode === 400) {
+    if (event?.error?.statusCode === 400) {
       console.log(`[session-id] === 400 ERROR ===`);
       console.log(`[session-id] Error: ${event.error.message || String(event.error)}`);
-      console.log(`[session-id] Status: ${event.error.statusCode}`);
       
       if (event.messages) {
         dumpAllMessages(event.messages, "MESSAGES AT ERROR");
       }
       
       if (event.request) {
-        console.log(`[session-id] Request URL: ${event.request.url}`);
-        console.log(`[session-id] Request method: ${event.request.method}`);
+        console.log(`[session-id] Request URL: ${event.request.url || 'N/A'}`);
+        console.log(`[session-id] Request method: ${event.request.method || 'N/A'}`);
         if (event.request.body) {
-          console.log(`[session-id] Request body: ${JSON.stringify(event.request.body).slice(0, 1000)}`);
+          console.log(`[session-id] Request body: ${safeString(event.request.body, 2000)}`);
+        }
+        if (event.request.headers) {
+          console.log(`[session-id] Request headers: ${safeString(event.request.headers)}`);
         }
       }
       
       if (event.response) {
-        console.log(`[session-id] Response status: ${event.response.status}`);
+        console.log(`[session-id] Response status: ${event.response.status || 'N/A'}`);
         if (event.response.body) {
-          console.log(`[session-id] Response body: ${JSON.stringify(event.response.body).slice(0, 500)}`);
+          console.log(`[session-id] Response body: ${safeString(event.response.body, 1000)}`);
         }
       }
     }
