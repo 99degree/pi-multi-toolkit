@@ -10,9 +10,11 @@
  * 2. Explicit routes: user-defined provider/model chains for failover.
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Model, Api } from "@earendil-works/pi-ai";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isRateLimitError } from "../shared.ts";
 
 interface RouteHop { provider: string; model: string; }
 interface RouteDef {
@@ -100,20 +102,49 @@ class RouteManager {
     return r;
   }
 
-  nextHop(currentProvider: string, currentModel: string): { provider: string; model: string; route?: string } | null {
+  /**
+   * Match a hop against a provider/model pair.
+   * Empty model string matches any model (wildcard).
+   */
+  private matchHop(hop: RouteHop, provider: string, model: string): boolean {
+    return hop.provider === provider && (hop.model === "" || hop.model === model);
+  }
+
+  /**
+   * Find the next hop in a route after the current provider/model fails.
+   * Returns null if no failover is available.
+   * Empty model in a hop acts as wildcard (keeps same model).
+   * @param skipIf Optional function to skip certain provider names (e.g., cooldown check).
+   */
+  nextHop(
+    currentProvider: string,
+    currentModel: string,
+    skipIf?: (provider: string) => boolean,
+  ): { provider: string; model: string; route?: string } | null {
+    // Try explicit routes first
     for (const r of this.list()) {
       if (r.paused) continue;
-      const idx = r.hops.findIndex(h => h.provider === currentProvider && h.model === currentModel);
+      const idx = r.hops.findIndex(h => this.matchHop(h, currentProvider, currentModel));
       if (idx === -1) continue;
+      // Try subsequent hops, wrapping around
       for (let i = 1; i < r.hops.length; i++) {
         const ni = (idx + i) % r.hops.length;
         const hop = r.hops[ni];
-        if (hop.provider === currentProvider && hop.model === currentModel) return null;
+        // Skip if same as current (wrapped all the way around)
+        if (this.matchHop(hop, currentProvider, currentModel)) continue;
+        // Skip if this provider is on cooldown or otherwise disallowed
+        if (skipIf?.(hop.provider)) continue;
+        // Empty model means keep same model from current provider
+        const model = hop.model || currentModel;
         r.cursor = ni; r.updatedAt = now(); this.markDirty();
-        return { provider: hop.provider, model: hop.model, route: r.name };
+        return { provider: hop.provider, model, route: r.name };
       }
     }
-    return findCloneModel(currentProvider, currentModel, () => this.getAuthList(), currentProvider);
+    // Fallback to clone auto-routing: same model, next clone of same base provider
+    // (also respects skipIf via the skip parameter)
+    const cloneResult = findCloneModel(currentProvider, currentModel, () => this.getAuthList(), currentProvider);
+    if (cloneResult && skipIf?.(cloneResult.provider)) return null;
+    return cloneResult;
   }
 
   renderSummary(): string {
@@ -299,6 +330,21 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, mgr: Rou
 }
 
 // ---------------------------------------------------------------------------
+// Auto-failover on 429 (rate limit) — hooks into after_provider_response
+// ---------------------------------------------------------------------------
+
+/**
+ * Find a Model object for the given provider and model ID.
+ * If modelId is empty/undefined, returns the first available model for that provider.
+ */
+function resolveModel(ctx: ExtensionContext, provider: string, modelId: string): Model<Api> | undefined {
+  const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === provider) as Model<Api>[];
+  if (!models.length) return undefined;
+  if (!modelId) return models[0];
+  return models.find(m => m.id === modelId) || models[0];
+}
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -312,6 +358,97 @@ export default function (pi: ExtensionAPI) {
     await initP;
     return mgr!;
   }
+
+  /** Ensure mgr is initialized before handling events */
+  async function ensureInit(ctx: ExtensionContext): Promise<RouteManager> {
+    const m = await init();
+    m.getAuthList = () => ctx.modelRegistry.authStorage.list();
+    return m;
+  }
+
+  /** Cooldown map: provider → timestamp when it can be retried */
+  const cooldowns = new Map<string, number>();
+  const COOLDOWN_MS = 30_000; // 30 seconds
+
+  /** Debounce: prevent multiple failover attempts for the same error cascade */
+  let lastFailoverAt = 0;
+  const FAILOVER_DEBOUNCE_MS = 5_000;
+
+  /** Check if a provider is on cooldown */
+  function isOnCooldown(provider: string): boolean {
+    const until = cooldowns.get(provider);
+    return until !== undefined && Date.now() < until;
+  }
+
+  /** Mark a provider as cooldown (should not be retried for a while) */
+  function markCooldown(provider: string): void {
+    cooldowns.set(provider, Date.now() + COOLDOWN_MS);
+  }
+
+  /**
+   * Attempt failover: find next hop and switch to it.
+   * Returns true if failover succeeded, false otherwise.
+   */
+  async function tryFailover(ctx: ExtensionContext, errorMsg?: string): Promise<boolean> {
+    // Debounce: if we just did a failover, skip to avoid double-triggering
+    const now = Date.now();
+    if (now - lastFailoverAt < FAILOVER_DEBOUNCE_MS) return false;
+    lastFailoverAt = now;
+
+    const currentModel = ctx.model;
+    if (!currentModel) return false;
+
+    const m = await ensureInit(ctx);
+
+    // Mark current provider as cooldown so nextHop can skip it
+    markCooldown(currentModel.provider);
+
+    const next = m.nextHop(currentModel.provider, currentModel.id, isOnCooldown);
+    if (!next) {
+      if (errorMsg) {
+        ctx.ui.notify(`Rate limited on ${currentModel.provider}/${currentModel.id} — no failover route found.`, "warning");
+      }
+      return false;
+    }
+
+    const targetModel = resolveModel(ctx, next.provider, next.model);
+    if (!targetModel) {
+      ctx.ui.notify(`Failover: next hop ${next.provider}/${next.model} has no registered model.`, "error");
+      return false;
+    }
+
+    const ok = await pi.setModel(targetModel);
+    if (ok) {
+      const routeInfo = next.route ? ` (route: ${next.route})` : "";
+      ctx.ui.notify(`Switched: ${currentModel.provider}/${currentModel.id} → ${next.provider}/${next.model}${routeInfo}`, "info");
+      return true;
+    } else {
+      ctx.ui.notify(`Failover: failed to switch to ${next.provider}/${next.model}.`, "error");
+      return false;
+    }
+  }
+
+  // ── Fast path: detect 429 HTTP responses ──
+  pi.on("after_provider_response", async (event: any, ctx: ExtensionContext) => {
+    if (event.status !== 429) return;
+    ctx.ui.notify(`HTTP 429 detected — attempting failover`, "warning");
+    await tryFailover(ctx);
+  });
+
+  // ── Main path: catch rate limit errors from agent_end (matches error messages) ──
+  pi.on("agent_end", async (event: any, ctx: ExtensionContext) => {
+    if (!event.messages?.length) return;
+    const lastMsg = event.messages[event.messages.length - 1];
+    if (!lastMsg || lastMsg.role !== "assistant") return;
+    if (lastMsg.stopReason !== "error") return;
+    if (!lastMsg.errorMessage) return;
+
+    // Only trigger failover on rate-limit-like errors
+    if (!isRateLimitError(lastMsg.errorMessage)) return;
+
+    ctx.ui.notify(`Rate limit error detected in agent_end — attempting failover`, "warning");
+    await tryFailover(ctx, lastMsg.errorMessage);
+  });
 
   pi.registerCommand("route", {
     description: "Manage failover routing — interactive menu (no args) or direct commands.",
