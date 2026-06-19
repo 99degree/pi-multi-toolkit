@@ -39,7 +39,11 @@ function fixMistralRoles(msgs: any[]): { messages: any[]; modified: boolean } {
     
     // Check for tool or toolResult followed by user
     if ((currentRole === "tool" || currentRole === "toolResult") && nextRole === "user") {
-      messages.splice(i + 1, 0, { role: "assistant", content: "" });
+      // Insert empty assistant message with proper content array format
+      messages.splice(i + 1, 0, { 
+        role: "assistant", 
+        content: [] 
+      });
       modified = true;
     }
   }
@@ -53,7 +57,10 @@ function fixMistralRoles(msgs: any[]): { messages: any[]; modified: boolean } {
         nextRole !== "assistant" && 
         nextRole !== "tool" && 
         nextRole !== "toolResult") {
-      messages.splice(i + 1, 0, { role: "assistant", content: "" });
+      messages.splice(i + 1, 0, { 
+        role: "assistant", 
+        content: [] 
+      });
       modified = true;
     }
   }
