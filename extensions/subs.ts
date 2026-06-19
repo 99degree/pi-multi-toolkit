@@ -19,7 +19,7 @@ import {
   SubEntry, MultiPassConfig, PROVIDER_TEMPLATES, registerSub,
   subProviderName, subDisplayName, loadGlobalConfig, saveGlobalConfig,
   loadEffectiveConfig, parseEnvConfig, mergeConfigs, normalizeEntries,
-} from "./lib/shared.ts";
+} from "../shared.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
