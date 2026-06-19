@@ -1,13 +1,12 @@
 /**
  * pi Session ID — Mistral compatibility layer
  * 
- * Always applied fixes:
- * 1. Inject session ID as first system message
- * 2. Normalize roles: toolResult→tool, bashExecution→tool, compactionSummary→system, developer→system
- * 3. Remove toolCall objects from content arrays
- * 4. Clean up empty/duplicate messages
+ * - Persists a session ID for Mistral's x-affinity caching
+ * - Fixes Mistral's strict role alternation (tool → assistant → user)
+ *   by inserting an assistant message between toolResult → user
+ *   directly in the API payload.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -26,164 +25,64 @@ async function getOrCreateSessionId(): Promise<string> {
   }
 }
 
-function ensureContentFormat(content: any): any {
-  if (content === undefined || content === null) return [];
-  if (typeof content === 'string') return [{ type: 'text', text: content }];
-  if (Array.isArray(content)) {
-    return content.map(item => {
-      if (typeof item === 'string') return { type: 'text', text: item };
-      if (item?.text !== undefined) return { type: 'text', text: String(item.text) };
-      return { type: 'text', text: JSON.stringify(item) };
-    });
-  }
-  if (typeof content === 'object') {
-    if (content.text !== undefined) return [{ type: 'text', text: String(content.text) }];
-    if (content.summary !== undefined) return [{ type: 'text', text: String(content.summary) }];
-    if (content.output !== undefined) return [{ type: 'text', text: String(content.output) }];
-  }
-  return [{ type: 'text', text: JSON.stringify(content) }];
+/**
+ * Check if a model ID is Mistral-based (direct or provider-prefixed).
+ */
+function isMistralModel(modelId?: string): boolean {
+  if (!modelId) return false;
+  const id = modelId.toLowerCase();
+  const name = id.split("/").pop() || id;
+  return /^mistral[-.]/.test(name) || name.startsWith("mistral");
 }
 
-function cleanForMistral(msgs: any[], sessionId: string, needsReinject: boolean): { messages: any[]; modified: boolean } {
-  if (!msgs || !Array.isArray(msgs)) return { messages: msgs || [], modified: false };
-  
+/**
+ * Insert an assistant message between tool → user in the messages array.
+ * Mistral strict-mode APIs reject tool → user; they require tool → assistant → user.
+ * Modifies the array in-place and returns true if any change was made.
+ */
+function ensureToolAssistantUser(msgs: any[]): boolean {
   let modified = false;
-  let messages = [...msgs];
-
-  // 1. Add session ID as first system message if needed
-  if (needsReinject) {
-    const hasSessionId = messages.some((m: any) =>
-      m?.role === "system" && 
-      Array.isArray(m.content) && 
-      m.content.some((c: any) => c.type === 'text' && c.text?.includes(`[Session-ID: ${sessionId}]`))
-    );
-    
-    if (!hasSessionId) {
-      messages.unshift({
-        role: "system",
-        content: [{ type: 'text', text: `[Session-ID: ${sessionId}]` }],
+  for (let i = 0; i < msgs.length - 1; i++) {
+    if (msgs[i]?.role === "tool" && msgs[i + 1]?.role === "user") {
+      msgs.splice(i + 1, 0, {
+        role: "assistant",
+        content: "Continuing",
       });
       modified = true;
+      i++; // skip the inserted assistant
     }
   }
-
-  // 2. Convert compactionSummary and developer to system
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i];
-    if (!m) continue;
-    
-    if (m.role === "compactionSummary" || m.role === "developer") {
-      messages[i] = { 
-        ...m, 
-        role: "system",
-        content: ensureContentFormat(m.content || m.summary || ""),
-      };
-      modified = true;
-    }
-  }
-
-  // 3. Convert toolResult and bashExecution to tool (Mistral supports 'tool', not 'toolResult')
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i];
-    if (!m) continue;
-    
-    if (m.role === "toolResult" || m.role === "bashExecution") {
-      messages[i] = { 
-        ...m, 
-        role: "tool",
-        content: ensureContentFormat(m.content || m.output || m.summary || ""),
-      };
-      modified = true;
-    }
-  }
-
-  // 4. Remove toolCall objects from content arrays
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i];
-    if (!m || !Array.isArray(m.content)) continue;
-    
-    const hasToolCall = m.content.some((c: any) => c.type === 'toolCall');
-    if (hasToolCall) {
-      messages[i] = { 
-        ...m, 
-        content: m.content.filter((c: any) => c.type !== 'toolCall'),
-      };
-      modified = true;
-    }
-  }
-
-  // 5. Clean up consecutive system messages
-  for (let i = 1; i < messages.length; i++) {
-    if (messages[i]?.role === "system" && messages[i-1]?.role === "system") {
-      const prevHasSessionId = Array.isArray(messages[i-1].content) && 
-        messages[i-1].content.some((c: any) => c.type === 'text' && c.text?.includes('[Session-ID:'));
-      if (prevHasSessionId) {
-        messages.splice(i, 1);
-        modified = true;
-        i--;
-      }
-    }
-  }
-
-  // 6. Remove empty assistant messages
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.role === "assistant") {
-      const content = m.content;
-      if (!content || (Array.isArray(content) && content.length === 0)) {
-        messages.splice(i, 1);
-        modified = true;
-      } else if (Array.isArray(content) && content.every((c: any) => 
-        !c.text || c.text.trim() === ""
-      )) {
-        messages.splice(i, 1);
-        modified = true;
-      }
-    }
-  }
-
-  return { messages, modified };
+  return modified;
 }
 
 export default function (pi: ExtensionAPI) {
   let sessionId = "";
-  let needsReinject = true;
 
   // ── Session start ──
   pi.on("session_start", async (_event: any, ctx: any) => {
     sessionId = await getOrCreateSessionId();
     ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
-    needsReinject = true;
   });
 
-  // ── Session compact ──
-  pi.on("session_compact", async () => {
-    needsReinject = true;
-  });
+  // ── Before provider request: fix Mistral role alternation ──
+  let mistralFixNotified = false;
+  pi.on("before_provider_request", async (event: any, ctx: ExtensionContext) => {
+    // Only applies to Mistral-based models
+    if (!isMistralModel(ctx?.model?.id)) {
+      mistralFixNotified = false;
+      return;
+    }
 
-  // ── Apply fixes at all relevant events ──
-  const messageEvents = ["context", "before_provider_request", "model_request"];
+    if (!mistralFixNotified) {
+      mistralFixNotified = true;
+      ctx.ui.notify(`Mistral tool role fix: ${ctx.model?.id || "?"}`, "info");
+    }
 
-  for (const eventName of messageEvents) {
-    pi.on(eventName, async (event: any) => {
-      const msgs = event?.messages;
-      if (!msgs || !Array.isArray(msgs)) return;
-      
-      const isContext = eventName === "context";
-      const { messages, modified } = cleanForMistral(msgs, sessionId, needsReinject && isContext);
-      
-      if (isContext && needsReinject) {
-        needsReinject = false;
-      }
-      
-      return modified ? { messages } : undefined;
-    });
-  }
+    const msgs = event?.payload?.messages;
+    if (!msgs || !Array.isArray(msgs) || msgs.length < 2) return;
 
-  // ── Error logging ──
-  pi.on("model_error", async (event: any) => {
-    if (event?.error?.statusCode === 400) {
-      console.log(`[session-id] 400 ERROR: ${event.error.message || String(event.error)}`);
+    if (ensureToolAssistantUser(msgs)) {
+      return event.payload;
     }
   });
 }
