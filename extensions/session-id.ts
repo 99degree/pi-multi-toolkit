@@ -47,11 +47,11 @@ export default function (pi: ExtensionAPI) {
 
     // 1) Mistral alternation fix: tool → user is not allowed.
     //    Insert empty assistant message between them.
-    for (let i = 0; i < msgs.length - 1; i++) {
+    //    Need to iterate backwards to avoid index shifting issues.
+    for (let i = msgs.length - 2; i >= 0; i--) {
       if (msgs[i].role === "tool" && msgs[i + 1].role === "user") {
         msgs.splice(i + 1, 0, { role: "assistant", content: "" });
         modified = true;
-        break; // only first violation
       }
     }
 
