@@ -34,7 +34,7 @@ import { type SelectItem } from "@earendil-works/pi-tui";
 // Stub OAuth providers for google-gemini-cli and google-antigravity
 // ===========================================================================
 
-export function apiKeyOAuthProvider(providerName: string, displayName: string): OAuthProviderInterface {
+function apiKeyOAuthProvider(providerName: string, displayName: string): OAuthProviderInterface {
 	return {
 		id: providerName,
 		name: displayName,
@@ -65,10 +65,10 @@ const refreshAntigravityToken = (_refresh: string, _projectId: string): Promise<
 // Types
 // ===========================================================================
 
-export type CopilotCredentials = OAuthCredentials & { enterpriseUrl?: string };
-export type GeminiCredentials = OAuthCredentials & { projectId?: string };
+type CopilotCredentials = OAuthCredentials & { enterpriseUrl?: string };
+type GeminiCredentials = OAuthCredentials & { projectId?: string };
 
-export interface ProviderTemplate {
+interface ProviderTemplate {
 	displayName: string;
 	builtinOAuth: OAuthProviderInterface;
 	usesCallbackServer?: boolean;
@@ -108,7 +108,7 @@ export interface EffectiveConfig {
 // Helpers
 // ===========================================================================
 
-export function buildApiKeyOAuthProvider(
+function buildApiKeyOAuthProvider(
 	index: number,
 	displayName: string,
 	prompt: string,
@@ -138,7 +138,7 @@ export function buildApiKeyOAuthProvider(
 	};
 }
 
-export function providerModel(
+function providerModel(
 	provider: string,
 	id: string,
 	name: string,
@@ -625,19 +625,19 @@ export function normalizeEntries(entries: SubEntry[]): SubEntry[] { return entri
 
 export function subProviderName(entry: SubEntry): string { return `${entry.provider}-${entry.index}`; }
 
-export function subDisplayName(entry: SubEntry): string {
+function subDisplayName(entry: SubEntry): string {
   const tmpl = PROVIDER_TEMPLATES[entry.provider];
   const base = tmpl?.displayName || entry.provider;
   return entry.label ? `${entry.label} — ${base} #${entry.index}` : `${base} #${entry.index}`;
 }
 
-export function getBaseProvider(providerName: string): string | undefined {
+function getBaseProvider(providerName: string): string | undefined {
   if (PROVIDER_TEMPLATES[providerName]) return providerName;
   const m = providerName.match(/^(.+)-\d+$/);
   return m && PROVIDER_TEMPLATES[m[1]] ? m[1] : undefined;
 }
 
-export function getProviderDisplayName(providerName: string, subs: SubEntry[]): string {
+function getProviderDisplayName(providerName: string, subs: SubEntry[]): string {
   const sub = subs.find((e) => subProviderName(e) === providerName);
   if (sub) return subDisplayName(sub);
   return PROVIDER_TEMPLATES[providerName]?.displayName || providerName;
@@ -658,14 +658,14 @@ export function isRateLimitError(msg: string): boolean {
   return RATE_LIMIT_PATTERNS.some((p) => p.test(msg));
 }
 
-export function globalConfigPath(): string { return join(getAgentDir(), "multi-pass.json"); }
-export function projectConfigPath(cwd: string): string { return join(cwd, ".pi", "multi-pass.json"); }
+function globalConfigPath(): string { return join(getAgentDir(), "multi-pass.json"); }
+function projectConfigPath(cwd: string): string { return join(cwd, ".pi", "multi-pass.json"); }
 
-export function emptyMultiPassConfig(): MultiPassConfig {
+function emptyMultiPassConfig(): MultiPassConfig {
   return { subscriptions: [], routes: [] };
 }
 
-export function normalizeMultiPassConfig(raw: unknown): MultiPassConfig {
+function normalizeMultiPassConfig(raw: unknown): MultiPassConfig {
   const parsed = typeof raw === "object" && raw ? (raw as Partial<MultiPassConfig>) : {};
   return {
     subscriptions: Array.isArray(parsed.subscriptions) ? parsed.subscriptions : [],
@@ -691,14 +691,14 @@ export function saveGlobalConfig(cfg: MultiPassConfig): void {
   writeFileSync(path, JSON.stringify(cfg, null, 2), "utf-8");
 }
 
-export function normalizeProjectConfig(raw: unknown): ProjectConfig {
+function normalizeProjectConfig(raw: unknown): ProjectConfig {
   const parsed = typeof raw === "object" && raw ? (raw as Partial<ProjectConfig>) : {};
   const out: ProjectConfig = {};
   if (Array.isArray(parsed.allowedSubs)) out.allowedSubs = parsed.allowedSubs;
   return out;
 }
 
-export function loadProjectConfig(cwd: string): ProjectConfig | undefined {
+function loadProjectConfig(cwd: string): ProjectConfig | undefined {
   const path = projectConfigPath(cwd);
   if (!existsSync(path)) return undefined;
   try { return normalizeProjectConfig(JSON.parse(readFileSync(path, "utf-8"))); } catch { return undefined; }
@@ -726,14 +726,14 @@ export function loadEffectiveConfig(cwd: string): EffectiveConfig {
 // Model helpers
 // ===========================================================================
 
-export function stripJsonCommentsAndTrailingCommas(input: string): string {
+function stripJsonCommentsAndTrailingCommas(input: string): string {
   return input
     .replace(/\/\*[^]*?\*\//g, "")
     .replace(/\/\/.*$/gm, "")
     .replace(/,\s*([}\]])/g, "$1");
 }
 
-export function loadModelsJsonProviderModels(providerName: string): Model<Api>[] {
+function loadModelsJsonProviderModels(providerName: string): Model<Api>[] {
   try {
     const path = join(getAgentDir(), "models.json");
     const raw = readFileSync(path, "utf-8");
@@ -757,12 +757,12 @@ export function loadModelsJsonProviderModels(providerName: string): Model<Api>[]
   } catch { return []; }
 }
 
-export function getRegistryModelsForProvider(ctx: ExtensionContext | ExtensionCommandContext | undefined, provider: string): Model<Api>[] {
+function getRegistryModelsForProvider(ctx: ExtensionContext | ExtensionCommandContext | undefined, provider: string): Model<Api>[] {
   if (!ctx) return [];
   return ctx.modelRegistry.getAll().filter((m) => m.provider === provider) as Model<Api>[];
 }
 
-export function cloneModels(originalProvider: string, index: number, ctx?: ExtensionContext | ExtensionCommandContext, aliasProvider?: string) {
+function cloneModels(originalProvider: string, index: number, ctx?: ExtensionContext | ExtensionCommandContext, aliasProvider?: string) {
   const registry = [...getRegistryModelsForProvider(ctx, originalProvider), ...(aliasProvider ? getRegistryModelsForProvider(ctx, aliasProvider) : [])];
   const modelsJson = [...loadModelsJsonProviderModels(originalProvider), ...(aliasProvider ? loadModelsJsonProviderModels(aliasProvider) : [])];
   const system = [...getModels(originalProvider as any), ...(aliasProvider ? getModels(aliasProvider as any) : [])];
@@ -817,7 +817,7 @@ export function registerSub(pi: ExtensionAPI, entry: SubEntry, ctx?: ExtensionCo
 // UI helpers for provider/model selection
 // ===========================================================================
 
-export function formatModelDescription(m: Model<Api>): string {
+function formatModelDescription(m: Model<Api>): string {
   const caps = m.input?.join(",") || "text";
   const ctx = m.contextWindow ? `${Math.round(m.contextWindow / 1000)}k ctx` : "";
   return [caps, ctx].filter(Boolean).join(" | ");
@@ -825,7 +825,7 @@ export function formatModelDescription(m: Model<Api>): string {
 
 export const SUPPORTED_PROVIDERS = Object.keys(PROVIDER_TEMPLATES);
 
-export function getAllProviderOptions(ctx: ExtensionCommandContext, config: MultiPassConfig): SelectItem[] {
+function getAllProviderOptions(ctx: ExtensionCommandContext, config: MultiPassConfig): SelectItem[] {
   const seen = new Set<string>();
   const items: SelectItem[] = [];
   for (const p of SUPPORTED_PROVIDERS) {
@@ -843,7 +843,7 @@ export function getAllProviderOptions(ctx: ExtensionCommandContext, config: Mult
   return items;
 }
 
-export function getSelectableModelsForProvider(ctx: ExtensionCommandContext, providerName: string): string[] {
+function getSelectableModelsForProvider(ctx: ExtensionCommandContext, providerName: string): string[] {
   const base = getBaseProvider(providerName) ?? providerName;
   const template = PROVIDER_TEMPLATES[base as keyof typeof PROVIDER_TEMPLATES];
   const source = template?.sourceProvider ?? base;
