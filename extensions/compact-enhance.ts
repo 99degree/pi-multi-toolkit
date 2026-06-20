@@ -263,6 +263,89 @@ The conversation below was governed by these directives. Preserve ALL rules, con
 ${trimmed}`;
 }
 
+/**
+ * Add dummy toolResult entries after every assistant message that has toolCall
+ * blocks in the summarized range.
+ *
+ * When compaction cuts at an assistant message containing toolCall blocks, those
+ * tool calls execute and produce toolResult entries — but those results fall on
+ * the KEPT side of the cut (after the cut point). The summarizer sees orphan
+ * tool calls (with no result in the summarized range), breaking the tool →
+ * result pairing.
+ *
+ * Fix: after each assistant message that has toolCall blocks, insert a dummy
+ * toolResult entry with a placeholder to complete the pair. The summarizer
+ * sees complete toolCall → toolResult chains and can process them normally.
+ * The dummy result is clearly marked as [compacted] so the summarizer can
+ * treat it as informational rather than literal.
+ */
+function completeOrphanToolCalls(messages: any[]): void {
+  const DUMMY_RESULT = {
+    role: "toolResult" as const,
+    content: [{ type: "text" as const, text: "[compacted: tool result in kept context]" }],
+    toolCallId: "__compact_dummy__",
+  };
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant") continue;
+    if (!Array.isArray(msg.content)) continue;
+
+    const hasToolCalls = msg.content.some(
+      (block: any) => block?.type === "toolCall",
+    );
+    if (!hasToolCalls) continue;
+
+    // Insert dummy toolResult right after this assistant message
+    messages.splice(i + 1, 0, { ...DUMMY_RESULT });
+  }
+}
+
+/**
+ * Complete orphan toolResult entries in the turn prefix by prepending a dummy
+ * assistant message with the corresponding toolCall blocks.
+ *
+ * In split-turn compaction, turnPrefixMessages may contain toolResult entries
+ * whose tool calls are in the suffix (kept range). The summarizer sees orphan
+ * tool results with no preceding tool call — ambiguous and potentially confusing.
+ *
+ * Fix: for each toolResult entry in the prefix, prepend a dummy assistant
+ * message containing a matching toolCall block (with dummy arguments). This
+ * completes the toolCall → toolResult pair so the summarizer sees a valid
+ * chain. The dummy entries are marked as [compacted] to distinguish them.
+ */
+function completeOrphanToolResults(messages: any[]): void {
+  const toInject: any[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "toolResult") continue;
+
+    const toolCallId = msg.toolCallId || "__compact_dummy__";
+    const dummyToolCall = {
+      type: "toolCall",
+      id: toolCallId,
+      name: "[compacted_tool]",
+      arguments: { __compacted__: true },
+    };
+    const dummyAssistant = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "[compacted: tool call in kept context]" },
+        dummyToolCall,
+      ],
+    };
+
+    toInject.push({ afterIndex: i, assistant: dummyAssistant });
+  }
+
+  // Inject dummy assistants in reverse order so indices stay valid
+  for (let j = toInject.length - 1; j >= 0; j--) {
+    const { afterIndex, assistant } = toInject[j];
+    messages.splice(afterIndex, 0, assistant);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
@@ -288,33 +371,48 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── session_before_compact: auto-inject smart instructions ──
-  pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: any) => {
-    // If user already passed custom instructions (via /compact), use those — use those AND
-    // still inject AGENTS.md directives so the summarizer respects the operational constraints
-    const userInstructions = (event.customInstructions || "").trim();
+    // ── session_before_compact: auto-inject smart instructions + fix orphan tool pairs ──
+    pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: any) => {
+      const prep = event.preparation;
+      if (!prep) return;
 
-    // Discover AGENTS.md content (mirrors pi's resource-loader discovery order:
-    // cwd → ancestors → ~/.pi/agent)
-    const agentDir = ctx.sessionManager?.agentDir
-      ?? path.join(process.env.HOME || "/data/data/com.termux/files/home", ".pi");
-    const cwd = ctx.cwd || process.cwd();
-    const agentsMdContent = await discoverAgentsMd(cwd, agentDir);
-    const agentsMdReminder = buildAgentsMdReminder(agentsMdContent);
+      // ── Fix orphan tool calls/results BEFORE summarization ──
+      // For messagesToSummarize: each assistant with toolCalls is orphan because
+      // its toolResult entries are in the KEPT range. Insert dummy toolResult
+      // after each such assistant to complete the pair.
+      completeOrphanToolCalls(prep.messagesToSummarize);
 
-    // Auto-detect activity type and build style instructions
-    const activityType = detectActivityType(event.branchEntries);
-    lastDetectedActivity = activityType;
-    const styleInstructions = buildInstructionsFromActivity(activityType);
+      // For turnPrefixMessages: each toolResult is orphan because its toolCall
+      // is in the kept suffix. Prepend a dummy assistant+toolCall before each
+      // orphan toolResult to complete the pair.
+      if (prep.isSplitTurn) {
+        completeOrphanToolResults(prep.turnPrefixMessages);
+      }
 
-    // Compose: AGENTS.md directives first, then style instructions, then user focus
-    const allInstructions = [agentsMdReminder, styleInstructions, userInstructions]
-      .filter(Boolean)
-      .join("\n\n");
+      // ── Build summarization instructions ──
+      const userInstructions = (event.customInstructions || "").trim();
 
-    // Mutate event.customInstructions in-place — forwarded to compact()
-    (event as any).customInstructions = allInstructions;
-  });
+      // Discover AGENTS.md content (mirrors pi's resource-loader discovery order:
+      // cwd → ancestors → ~/.pi/agent)
+      const agentDir = ctx.sessionManager?.agentDir
+        ?? path.join(process.env.HOME || "/data/data/com.termux/files/home", ".pi");
+      const cwd = ctx.cwd || process.cwd();
+      const agentsMdContent = await discoverAgentsMd(cwd, agentDir);
+      const agentsMdReminder = buildAgentsMdReminder(agentsMdContent);
+
+      // Auto-detect activity type and build style instructions
+      const activityType = detectActivityType(event.branchEntries);
+      lastDetectedActivity = activityType;
+      const styleInstructions = buildInstructionsFromActivity(activityType);
+
+      // Compose: AGENTS.md directives first, then style instructions, then user focus
+      const allInstructions = [agentsMdReminder, styleInstructions, userInstructions]
+        .filter(Boolean)
+        .join("\n\n");
+
+      // Mutate event.customInstructions in-place — forwarded to compact()
+      (event as any).customInstructions = allInstructions;
+    });
 
   // ── session_compact: stats notification ──
   pi.on("session_compact", (event: SessionCompactEvent) => {
