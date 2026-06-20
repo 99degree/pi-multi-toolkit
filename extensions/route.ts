@@ -522,47 +522,6 @@ Open ${info.verificationUri}`, "info"),
       ctx.ui.notify(`Failover: failed to switch to ${next.provider}/${next.model}.`, "error");
       return false;
     }
-
-    // Check if target provider has auth; if not, prompt for login
-    const authedProviders = allAuthedProviders(ctx);
-    if (!authedProviders.includes(next.provider)) {
-      ctx.ui.notify(`Failover target ${next.provider} needs auth — login required`, "warning");
-      // Try to auto-login via subs extension
-      try {
-        await ctx.modelRegistry.authStorage.login(next.provider, {
-          onAuth: (info) => ctx.ui.notify(`Open: ${info.url}${info.instructions ? `
-${info.instructions}` : ""}`, "info"),
-          onDeviceCode: (info) => ctx.ui.notify(`Code: ${info.userCode}
-Open ${info.verificationUri}`, "info"),
-          onPrompt: async (p) => (await ctx.ui.input(p.message, p.placeholder || "")) || "",
-          onProgress: (msg) => ctx.ui.notify(msg, "info"),
-          onManualCodeInput: async () => (await ctx.ui.input("Auth code:", "")) || "",
-          onSelect: async (p) => ctx.ui.select(p.message, p.options.map(o => o.label)),
-        });
-        ctx.modelRegistry.refresh();
-        ctx.ui.notify(`Logged in to ${next.provider}`, "info");
-      } catch {
-        // OAuth failed, fall back to API key
-        const key = await ctx.ui.input(`API key for ${next.provider}:`, "");
-        if (key?.trim()) {
-          ctx.modelRegistry.authStorage.set(next.provider, { type: "api_key", key: key.trim() });
-          ctx.modelRegistry.refresh();
-          ctx.ui.notify(`API key set for ${next.provider}`, "info");
-        } else {
-          ctx.ui.notify(`No auth provided for ${next.provider} — API calls may fail`, "warning");
-        }
-      }
-    }
-
-    const ok = await pi.setModel(targetModel);
-    if (ok) {
-      const routeInfo = next.route ? ` (route: ${next.route})` : "";
-      ctx.ui.notify(`Switched: ${currentModel.provider}/${currentModel.id} → ${next.provider}/${next.model}${routeInfo}`, "info");
-      return true;
-    } else {
-      ctx.ui.notify(`Failover: failed to switch to ${next.provider}/${next.model}.`, "error");
-      return false;
-    }
   }
 
   // ── Before provider request: apply pending route switch ──
