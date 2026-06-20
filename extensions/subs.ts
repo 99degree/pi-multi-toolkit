@@ -13,7 +13,6 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { OAuthLoginCallbacks, OAuthPrompt, OAuthAuthInfo, OAuthDeviceCodeInfo, OAuthSelectPrompt } from "@earendil-works/pi-ai/oauth";
 import {
   SubEntry, MultiPassConfig, PROVIDER_TEMPLATES, registerSub,
   subProviderName, loadGlobalConfig, saveGlobalConfig,
@@ -33,67 +32,12 @@ function nextCloneIndex(provider: string, subs: SubEntry[]): number {
   return existing.length ? Math.max(...existing.map(s => s.index)) + 1 : 1;
 }
 
-function buildCallbacks(ctx: ExtensionCommandContext): OAuthLoginCallbacks {
-  return {
-    onAuth: (info: OAuthAuthInfo) => ctx.ui.notify(`Open:\n${info.url}${info.instructions ? `\n${info.instructions}` : ""}`, "info"),
-    onDeviceCode: (info: OAuthDeviceCodeInfo) => ctx.ui.notify(`Code: ${info.userCode}\nOpen ${info.verificationUri}`, "info"),
-    onPrompt: async (p: OAuthPrompt) => (await ctx.ui.input(p.message, p.placeholder || "")) || "",
-    onProgress: (m: string) => ctx.ui.notify(m, "info"),
-    onManualCodeInput: async () => (await ctx.ui.input("Auth code:", "")) || "",
-    onSelect: async (p: OAuthSelectPrompt) => ctx.ui.select(p.message, p.options.map(o => o.label)),
-  };
-}
-
-async function systemLogin(ctx: ExtensionCommandContext, subName: string): Promise<boolean> {
-  try {
-    await ctx.modelRegistry.authStorage.login(subName, buildCallbacks(ctx));
-    ctx.modelRegistry.refresh();
-    return true;
-  } catch {
-    const key = await ctx.ui.input(`API key for ${subName}:`, "");
-    if (!key?.trim()) { ctx.ui.notify("Canceled.", "info"); return false; }
-    ctx.modelRegistry.authStorage.set(subName, { type: "api_key", key: key.trim() });
-    ctx.modelRegistry.refresh();
-    return true;
-  }
-}
-
 async function altKeyLogin(ctx: ExtensionCommandContext, subName: string): Promise<boolean> {
   const key = await ctx.ui.input(`Alternative API key for ${subName}:`, "");
   if (!key?.trim()) { ctx.ui.notify("Canceled.", "info"); return false; }
   ctx.modelRegistry.authStorage.set(subName, { type: "api_key", key: key.trim() });
   ctx.modelRegistry.refresh();
   return true;
-}
-
-function describeProvider(provider: string): string {
-  const t = PROVIDER_TEMPLATES[provider];
-  if (!t) return `Unknown provider "${provider}".`;
-  const lines: string[] = [];
-  lines.push(`Provider: ${t.displayName || provider}`);
-  if (t.useOAuth === false || t.builtinOAuth?.name?.includes?.("API key")) {
-    lines.push("Auth:     API key");
-  } else if (t.builtinOAuth) {
-    lines.push("Auth:     OAuth");
-  } else {
-    lines.push("Auth:     ?");
-  }
-  if (t.sourceProvider) lines.push(`Source:   ${t.sourceProvider}`);
-  const models = t.models || [];
-  const builtin = t.builtinModels?.() || [];
-  const all = [...models, ...builtin];
-  if (all.length > 0) {
-    const reasonCount = all.filter((m: any) => m.reasoning).length;
-    lines.push(`Models:   ${all.length} available${reasonCount > 0 ? ` (${reasonCount} with reasoning)` : ""}`);
-    const baseUrl = all.find((m: any) => m.baseUrl)?.baseUrl;
-    if (baseUrl) lines.push(`API:      ${baseUrl}`);
-    lines.push("");
-    lines.push(all.slice(0, 5).map((m: any) => `  ${m.id}${m.reasoning ? " (reasoning)" : ""}`).join("\n")
-      + (all.length > 5 ? `\n  … and ${all.length - 5} more` : ""));
-  } else {
-    lines.push("Models:   (loaded from system — not pre-defined)");
-  }
-  return lines.join("\n");
 }
 
 function managedSubs(cfg: MultiPassConfig): SubEntry[] {
@@ -106,94 +50,68 @@ function managedSubs(cfg: MultiPassConfig): SubEntry[] {
 
 async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   const choices = [
-    "List subs",
-    "Add provider",
-    "Create clone",
+    "Switch model",
+    "Clone",
     "Login (alt API key)",
     "Remove sub",
-    "Switch model",
     "Exit",
   ];
 
   for (;;) {
-    const pick = await ctx.ui.select("\n=== Subscription Manager ===", choices);
-    if (!pick || pick === "Exit" || pick === choices[6]) break;
+    const pick = await ctx.ui.select("\n=== Subscriptions ===", choices);
+    if (!pick || pick === "Exit" || pick === choices[4]) break;
 
     const cfg = loadGlobalConfig();
 
     switch (pick) {
-      // ── List ──
+      // ── Switch model: pick provider → pick model → activate ──
       case choices[0]: {
         const subs = managedSubs(cfg);
         if (!subs.length) {
-          ctx.ui.notify("No managed subs. Use [Add provider] to create one.", "info");
-        } else {
-          ctx.ui.notify(
-            subs.map(e => {
-              const name = subProviderName(e);
-              const auth = ctx.modelRegistry.authStorage.hasAuth(name) ? "auth" : "no auth";
-              const kind = e.index > 0 ? `clone#${e.index}` : "base";
-              return `${name}  [${kind}]  (${auth})`;
-            }).join("\n"),
-            "info",
-          );
-        }
-        break;
-      }
-
-      // ── Add provider (system provider, always index 0) ──
-      case choices[1]: {
-        const allProviders = Object.keys(PROVIDER_TEMPLATES).sort();
-        const authed = new Set(ctx.modelRegistry.authStorage.list());
-        const labelMap = new Map<string, string>();
-        const labels = allProviders.map(p => {
-          const hasAuth = authed.has(p) ? "✓" : " ";
-          const label = `${hasAuth} ${p}`;
-          labelMap.set(label, p);
-          return label;
-        });
-        const pickedLabel = await ctx.ui.select("Choose provider:", labels);
-        if (!pickedLabel) break;
-        const pname = labelMap.get(pickedLabel) || pickedLabel.trim();
-
-        const existing = cfg.subscriptions.filter(s => s.provider === pname);
-        if (existing.length > 0) {
-          ctx.ui.notify(`"${pname}" already registered. Use [Create clone] for duplicates.`, "info");
+          ctx.ui.notify("No subs. Use [Add provider] first.", "info");
           break;
         }
+        const labels = subs.map(e => {
+          const n = subProviderName(e);
+          const auth = ctx.modelRegistry.authStorage.hasAuth(n) ? "✓" : "○";
+          const k = e.index > 0 ? `clone#${e.index}` : "base";
+          return `${auth} ${n}  [${k}]`;
+        });
+        const picked = await ctx.ui.select("Select provider:", labels);
+        if (!picked) break;
+        const idx = labels.indexOf(picked);
+        if (idx < 0) break;
+        const entry = subs[idx];
+        const name = subProviderName(entry);
 
-        // Show provider info before adding
-        ctx.ui.notify(describeProvider(pname), "info");
-
-        const entry: SubEntry = { provider: pname, index: 0 };
-        cfg.subscriptions.push(entry);
-        saveGlobalConfig(cfg);
-        registerSub(pi, entry, (ctx as any));
-
-        const ok = await systemLogin(ctx, subProviderName(entry));
-        if (!ok) {
-          cfg.subscriptions.splice(cfg.subscriptions.indexOf(entry), 1);
-          saveGlobalConfig(cfg);
-          try { ctx.modelRegistry.authStorage.logout(subProviderName(entry)); } catch { /* ignore */ }
-          ctx.modelRegistry.refresh();
-          ctx.ui.notify(`Canceled: "${pname}" not registered.`, "warning");
+        // Show models under selected provider
+        const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === name) as any[];
+        if (!models.length) { ctx.ui.notify(`No models for "${name}".`, "info"); break; }
+        const modelLabels = models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`);
+        const pickedModel = await ctx.ui.select(`Models for ${name}:`, modelLabels);
+        if (!pickedModel) break;
+        const mi = modelLabels.indexOf(pickedModel);
+        const target = mi >= 0 ? models[mi] : models[0];
+        const ok = await pi.setModel(target);
+        if (ok) {
+          ctx.ui.notify(`Switched to ${target.provider}/${target.id}`, "info");
+          ctx.ui.setStatus("subs-mgr", target.provider);
         } else {
-          ctx.ui.notify(`Added and logged in: "${subProviderName(entry)}".`, "info");
+          ctx.ui.notify("Failed.", "error");
         }
         break;
       }
 
-      // ── Create clone ──
-      case choices[2]: {
+      // ── Clone ──
+      case choices[1]: {
         const parents = [...new Set(cfg.subscriptions.filter(s => s.index === 0).map(s => s.provider))].sort();
         if (!parents.length) {
           ctx.ui.notify("No base providers. Use [Add provider] first.", "info");
           break;
         }
-        // Filter to only logged-in providers
         const loggedIn = parents.filter(p => ctx.modelRegistry.authStorage.hasAuth(subProviderName({ provider: p, index: 0 })));
         if (!loggedIn.length) {
-          ctx.ui.notify("No logged-in providers. Use [Add provider] to login first.", "info");
+          ctx.ui.notify("No logged-in providers to clone. Use [Add provider] to login first.", "info");
           break;
         }
         const pick = await ctx.ui.select("Clone which provider?", loggedIn);
@@ -209,7 +127,7 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
       }
 
       // ── Login (alt API key) ──
-      case choices[3]: {
+      case choices[2]: {
         const clones = managedSubs(cfg).filter(s => s.index > 0);
         if (!clones.length) { ctx.ui.notify("No clones to login.", "info"); break; }
         const names = clones.map(s => subProviderName(s));
@@ -221,7 +139,7 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
       }
 
       // ── Remove ──
-      case choices[4]: {
+      case choices[3]: {
         const subs = managedSubs(cfg);
         if (!subs.length) { ctx.ui.notify("Nothing to remove.", "info"); break; }
         const names = subs.map(s => subProviderName(s));
@@ -234,35 +152,6 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
         try { ctx.modelRegistry.authStorage.logout(pick); } catch { /* ignore */ }
         ctx.modelRegistry.refresh();
         ctx.ui.notify(`Removed ${pick}.`, "info");
-        break;
-      }
-
-      // ── Switch model ──
-      case choices[5]: {
-        const subs = managedSubs(cfg);
-        if (!subs.length) { ctx.ui.notify("No subs.", "info"); break; }
-        const allModels: any[] = [];
-        const allLabels: string[] = [];
-        for (const s of subs) {
-          const name = subProviderName(s);
-          const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === name) as any[];
-          for (const m of models) {
-            allModels.push(m);
-            allLabels.push(`${name}/${m.id}${m.reasoning ? " (reasoning)" : ""}`);
-          }
-        }
-        if (!allModels.length) { ctx.ui.notify("No models available.", "info"); break; }
-        const pick = await ctx.ui.select("Select model:", allLabels);
-        if (!pick) break;
-        const mi = allLabels.indexOf(pick);
-        const target = mi >= 0 ? allModels[mi] : allModels[0];
-        const ok = await pi.setModel(target);
-        if (ok) {
-          ctx.ui.notify(`Switched to ${target.provider}/${target.id}`, "info");
-          ctx.ui.setStatus("subs-mgr", target.provider);
-        } else {
-          ctx.ui.notify("Failed.", "error");
-        }
         break;
       }
     }
@@ -285,42 +174,9 @@ async function cmdList(ctx: ExtensionCommandContext): Promise<void> {
   }).join("\n"), "info");
 }
 
-async function cmdAdd(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
+async function cmdClone(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
   const parts = args.trim().split(/\s+/);
-  if (parts.length < 2) { ctx.ui.notify("Usage: /subs add <provider>", "warning"); return; }
-  const provider = parts[1];
-  const template = PROVIDER_TEMPLATES[provider];
-  if (!template) { ctx.ui.notify(`Unknown provider "${provider}".`, "error"); return; }
-
-  ctx.ui.notify(describeProvider(provider), "info");
-
-  const cfg = loadGlobalConfig();
-  const existing = cfg.subscriptions.filter(s => s.provider === provider);
-  if (existing.length > 0) {
-    ctx.ui.notify(`"${provider}" already registered. Use /subs create ${provider} for clones.`, "info");
-    return;
-  }
-
-  const entry: SubEntry = { provider, index: 0 };
-  cfg.subscriptions.push(entry);
-  saveGlobalConfig(cfg);
-  registerSub(pi, entry, (ctx as any));
-
-  const ok = await systemLogin(ctx, subProviderName(entry));
-  if (!ok) {
-    cfg.subscriptions.splice(cfg.subscriptions.indexOf(entry), 1);
-    saveGlobalConfig(cfg);
-    try { ctx.modelRegistry.authStorage.logout(subProviderName(entry)); } catch { /* ignore */ }
-    ctx.modelRegistry.refresh();
-    ctx.ui.notify(`Canceled: "${provider}" not registered.`, "warning");
-    return;
-  }
-  ctx.ui.notify(`Added and logged in: "${subProviderName(entry)}".`, "info");
-}
-
-async function cmdCreate(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
-  const parts = args.trim().split(/\s+/);
-  if (parts.length < 2) { ctx.ui.notify("Usage: /subs create <provider>", "warning"); return; }
+  if (parts.length < 2) { ctx.ui.notify("Usage: /subs clone <provider>", "warning"); return; }
   const provider = parts[1];
   if (!PROVIDER_TEMPLATES[provider]) { ctx.ui.notify(`Unknown provider "${provider}".`, "error"); return; }
 
@@ -386,9 +242,9 @@ async function cmdSwitch(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: s
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("subs", {
-    description: "Manage subscriptions — /subs (menu) | add | create | login | remove | list | switch",
+    description: "Manage subscriptions — /subs (menu) | clone | login | remove | list | switch",
     getArgumentCompletions: (prefix: string) => {
-      const cmds = ["add", "create", "login", "remove", "list", "switch"];
+      const cmds = ["clone", "login", "remove", "list", "switch"];
       return cmds.filter(c => c.startsWith(prefix)).map(c => ({ value: c, label: c }));
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
@@ -399,12 +255,11 @@ export default function (pi: ExtensionAPI) {
 
       switch (sub) {
         case "list":   await cmdList(ctx); break;
-        case "add":    await cmdAdd(pi, ctx, args); break;
-        case "create": await cmdCreate(pi, ctx, args); break;
+        case "clone": await cmdClone(pi, ctx, args); break;
         case "login":  await cmdLogin(ctx, args); break;
         case "remove": await cmdRemove(ctx, args); break;
         case "switch": await cmdSwitch(pi, ctx, args); break;
-        default: ctx.ui.notify(`Unknown: "${sub}". /subs add|create|login|remove|list|switch`, "warning");
+        default: ctx.ui.notify(`Unknown: "${sub}". /subs clone|login|remove|list|switch`, "warning");
       }
     },
   });
