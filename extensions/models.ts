@@ -45,30 +45,30 @@ export default function (pi: ExtensionAPI) {
       const provider = bases[idx];
 
       // Step 2: collect models from all auth'd accounts of this provider
-      const allModels = ctx.modelRegistry.getAll() as any[];
-      const authedNames = [...new Set(allModels.filter((m: any) => {
+      const allModelEntries = ctx.modelRegistry.getAll() as any[];
+      const authedNames = [...new Set(allModelEntries.filter((m: any) => {
         const p = m.provider;
         return p === provider || p.startsWith(provider + "-");
       }).map((m: any) => m.provider))];
-      const allModels: any[] = [];
-      const allLabels: string[] = [];
+      const modelList: any[] = [];
+      const modelLabels: string[] = [];
       for (const name of authedNames) {
         const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === name) as any[];
         for (const m of models) {
-          allModels.push(m);
-          allLabels.push(`${name}/${m.id}${m.reasoning ? " (reasoning)" : ""}`);
+          modelList.push(m);
+          modelLabels.push(`${name}/${m.id}${m.reasoning ? " (reasoning)" : ""}`);
         }
       }
-      if (!allModels.length) {
+      if (!modelList.length) {
         ctx.ui.notify("No models for this provider.", "info");
         return;
       }
 
       // Step 3: pick a model
-      const modelPick = await ctx.ui.select(`Models for ${provider}:`, allLabels);
+      const modelPick = await ctx.ui.select(`Models for ${provider}:`, modelLabels);
       if (!modelPick) return;
-      const mi = allLabels.indexOf(modelPick);
-      const target = mi >= 0 ? allModels[mi] : allModels[0];
+      const mi = modelLabels.indexOf(modelPick);
+      const target = mi >= 0 ? modelList[mi] : modelList[0];
       const ok = await pi.setModel(target);
       if (ok) {
         ctx.ui.notify(`Switched to ${target.provider}/${target.id}`, "info");

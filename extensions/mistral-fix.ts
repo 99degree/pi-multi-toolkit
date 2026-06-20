@@ -7,11 +7,11 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-function isMistralModel(modelId?: string): boolean {
+function isMistralSmall4x(modelId?: string): boolean {
   if (!modelId) return false;
   const id = modelId.toLowerCase();
   const name = id.split("/").pop() || id;
-  return /^mistral[-.]/.test(name) || name.startsWith("mistral");
+  return name.startsWith("mistral-small-latest") || name.startsWith("mistral-small-4");
 }
 
 function ensureToolAssistantUser(msgs: any[]): boolean {
@@ -33,7 +33,7 @@ export default function (pi: ExtensionAPI) {
   let notified = false;
 
   pi.on("before_provider_request", async (event: any, ctx: ExtensionContext) => {
-    if (!isMistralModel(ctx?.model?.id)) {
+    if (!isMistralSmall4x(ctx?.model?.id)) {
       notified = false;
       return;
     }
