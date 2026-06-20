@@ -11,7 +11,11 @@
       "./extensions/route.ts",
       "./extensions/session-id.ts",
       "./extensions/agents-md.ts",
-      "./extensions/search-tool.ts"
+      "./extensions/search-tool.ts",
+      "./extensions/models.ts"
     ]
+  },
+  "dependencies": {
+    "pi": "^2.0.5"
   }
 }
