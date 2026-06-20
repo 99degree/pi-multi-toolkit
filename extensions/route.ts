@@ -592,7 +592,7 @@ Open ${info.verificationUri}`, "info"),
           "  remove <name>\n" +
           "  toggle <name>      Pause/resume\n" +
           "  reset <name>       Reset cursor to first hop\n" +
-          "  switch [name]     Schedule switch to a route (pick list if no name) on next API call\n" +
+          "  switch [name]     Schedule switch to first unpaused (or named) route on next API call\n" +
           "Clone auto-route: providers with clones auto-rotate on failure.",
           "info");
         return;
@@ -639,22 +639,14 @@ Open ${info.verificationUri}`, "info"),
         case "switch": {
           const n = parts[1];
           if (!n) {
-            // Default: pick the first unpaused route's current hop
+            // No name: pick first unpaused route's current hop, no UI
             const routes = m.list().filter(r => !r.paused);
             if (!routes.length) { ctx.ui.notify("No unpaused routes to switch to.", "info"); break; }
-            const labels = routes.map(r => {
-              const cur = r.hops[r.cursor] || { provider: "?", model: "?" };
-              return `${r.name}  → ${cur.provider}/${cur.model}`;
-            });
-            const pick = await ctx.ui.select("Switch to which route?", labels);
-            if (!pick) break;
-            const ri = labels.indexOf(pick);
-            if (ri < 0) break;
-            const pickedRoute = routes[ri];
-            const hop = pickedRoute.hops[pickedRoute.cursor];
-            if (!hop) { ctx.ui.notify(`Route "${pickedRoute.name}" has no hops.`, "error"); break; }
-            pendingSwitch = { routeName: pickedRoute.name, provider: hop.provider, model: hop.model };
-            ctx.ui.notify(`Pending switch to route "${pickedRoute.name}" (${hop.provider}/${hop.model || "*"}) — will apply on next API call.`, "info");
+            const r = routes[0];
+            const hop = r.hops[r.cursor];
+            if (!hop) { ctx.ui.notify(`Route "${r.name}" has no hops.`, "error"); break; }
+            pendingSwitch = { routeName: r.name, provider: hop.provider, model: hop.model };
+            ctx.ui.notify(`Pending switch to first unpaused route "${r.name}" (${hop.provider}/${hop.model || "*"}) — will apply on next API call.`, "info");
           } else {
             const r = m.get(n);
             if (!r) { ctx.ui.notify(`Route "${n}" not found.`, "error"); break; }
