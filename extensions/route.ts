@@ -180,6 +180,73 @@ class RouteManager {
 }
 
 // ---------------------------------------------------------------------------
+// Edit route — add/remove/change hops
+// ---------------------------------------------------------------------------
+
+async function editRoute(mgr: RouteManager, route: RouteDef, ctx: ExtensionCommandContext): Promise<void> {
+  const rn = route.name;
+  const editOpts = ["Add hop", "Remove hop", "Change a hop", "Cancel"];
+  for (;;) {
+    const act = await ctx.ui.select(`\nEditing "${rn}" — ${route.hops.map(h => `${h.provider}/${h.model || "*"}`).join(" -> ")}`, editOpts);
+    if (!act || act === "Cancel") break;
+    switch (act) {
+      case "Add hop": {
+        const authList = ctx.modelRegistry.authStorage.list();
+        const providers = [...new Set(authList)].filter(p => p).sort();
+        if (!providers.length) { ctx.ui.notify("No providers.", "info"); break; }
+        const provPick = await ctx.ui.select("Pick provider:", providers);
+        if (!provPick) break;
+        const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === provPick) as any[];
+        const modelOpts = ["(same model)", ...models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`)];
+        const modelPick = await ctx.ui.select("Pick model:", modelOpts);
+        if (!modelPick) break;
+        const mi = modelOpts.indexOf(modelPick);
+        const model = mi > 0 ? (models[mi - 1]?.id || "") : "";
+        route.hops.push({ provider: provPick, model });
+        route.updatedAt = now();
+        mgr.markDirty();
+        ctx.ui.notify(`Added hop: ${provPick}/${model || "*"}`, "info");
+        break;
+      }
+      case "Remove hop": {
+        if (route.hops.length <= 2) { ctx.ui.notify("Need at least 2 hops.", "warning"); break; }
+        const hopLabels = route.hops.map((h, i) => `${i}: ${h.provider}/${h.model || "*"}`);
+        const hp = await ctx.ui.select("Remove which hop?", hopLabels);
+        if (!hp) break;
+        const idx = parseInt(hp.split(":")[0]);
+        route.hops.splice(idx, 1);
+        if (route.cursor >= route.hops.length) route.cursor = 0;
+        route.updatedAt = now();
+        mgr.markDirty();
+        ctx.ui.notify(`Removed hop ${idx}.`, "info");
+        break;
+      }
+      case "Change a hop": {
+        const hopLabels = route.hops.map((h, i) => `${i}: ${h.provider}/${h.model || "*"}`);
+        const hp = await ctx.ui.select("Change which hop?", hopLabels);
+        if (!hp) break;
+        const idx = parseInt(hp.split(":")[0]);
+        const authList = ctx.modelRegistry.authStorage.list();
+        const providers = [...new Set(authList)].filter(p => p).sort();
+        const provPick = await ctx.ui.select("New provider:", providers);
+        if (!provPick) break;
+        const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === provPick) as any[];
+        const modelOpts = ["(same model)", ...models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`)];
+        const modelPick = await ctx.ui.select("New model:", modelOpts);
+        if (!modelPick) break;
+        const mi = modelOpts.indexOf(modelPick);
+        const model = mi > 0 ? (models[mi - 1]?.id || "") : "";
+        route.hops[idx] = { provider: provPick, model };
+        route.updatedAt = now();
+        mgr.markDirty();
+        ctx.ui.notify(`Changed hop ${idx} to ${provPick}/${model || "*"}.`, "info");
+        break;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Interactive menu
 // ---------------------------------------------------------------------------
 
@@ -191,9 +258,43 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, mgr: Rou
     if (!pick || pick === "Exit" || pick === choices[6]) break;
 
     switch (pick) {
-      case choices[0]: // List
-        ctx.ui.notify(mgr.renderSummary(), "info");
+      case choices[0]: { // List → pick route → action
+        const routes = mgr.list();
+        if (!routes.length) { ctx.ui.notify("No routes.", "info"); break; }
+        const routeLabels = routes.map(r => {
+          const cur = r.hops[r.cursor] || { provider: "?", model: "?" };
+          return `${r.paused ? "⏸" : "▶"} ${r.name}  → ${cur.provider}/${cur.model}  [cursor=${r.cursor}]`;
+        });
+        const picked = await ctx.ui.select("Select route:", routeLabels);
+        if (!picked) break;
+        const ri = routeLabels.indexOf(picked);
+        if (ri < 0) break;
+        const route = routes[ri];
+        const actions = ["Edit route", "Remove route", "Toggle pause", "Reset cursor", "Cancel"];
+        const act = await ctx.ui.select(`Route: ${route.name}`, actions);
+        if (!act || act === "Cancel") break;
+        if (act === "Edit route") { await editRoute(mgr, route, ctx); break; }
+        if (act === "Remove route") {
+          mgr.removeRoute(route.name);
+          ctx.ui.notify(`Removed "${route.name}".`, "info");
+          break;
+        }
+        if (act === "Toggle pause") {
+          route.paused = !route.paused;
+          route.updatedAt = now();
+          mgr.markDirty();
+          ctx.ui.notify(`${route.paused ? "Paused" : "Unpaused"} "${route.name}".`, "info");
+          break;
+        }
+        if (act === "Reset cursor") {
+          route.cursor = 0;
+          route.updatedAt = now();
+          mgr.markDirty();
+          ctx.ui.notify(`Reset cursor for "${route.name}".`, "info");
+          break;
+        }
         break;
+      }
 
       case choices[1]: { // Create
         const name = await ctx.ui.input("Route name:", "e.g. fallback, primary");
@@ -232,65 +333,7 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, mgr: Rou
         const rn = await ctx.ui.select("Edit which route?", routes.map(r => r.name));
         if (!rn) break;
         const route = mgr.get(rn)!;
-        const editOpts = ["Add hop", "Remove hop", "Change a hop", "Cancel"];
-        for (;;) {
-          const act = await ctx.ui.select(`\nEditing "${rn}" — ${route.hops.map(h => `${h.provider}/${h.model || "*"}`).join(" -> ")}`, editOpts);
-          if (!act || act === "Cancel") break;
-          switch (act) {
-            case "Add hop": {
-              const authList = ctx.modelRegistry.authStorage.list();
-              const providers = [...new Set(authList)].filter(p => p).sort();
-              if (!providers.length) { ctx.ui.notify("No providers.", "info"); break; }
-              const provPick = await ctx.ui.select("Pick provider:", providers);
-              if (!provPick) break;
-              const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === provPick) as any[];
-              const modelOpts = ["(same model)", ...models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`)];
-              const modelPick = await ctx.ui.select("Pick model:", modelOpts);
-              if (!modelPick) break;
-              const mi = modelOpts.indexOf(modelPick);
-              const model = mi > 0 ? (models[mi - 1]?.id || "") : "";
-              route.hops.push({ provider: provPick, model });
-              route.updatedAt = now();
-              mgr.markDirty();
-              ctx.ui.notify(`Added hop: ${provPick}/${model || "*"}`, "info");
-              break;
-            }
-            case "Remove hop": {
-              if (route.hops.length <= 2) { ctx.ui.notify("Need at least 2 hops.", "warning"); break; }
-              const hopLabels = route.hops.map((h, i) => `${i}: ${h.provider}/${h.model || "*"}`);
-              const hp = await ctx.ui.select("Remove which hop?", hopLabels);
-              if (!hp) break;
-              const idx = parseInt(hp.split(":")[0]);
-              route.hops.splice(idx, 1);
-              if (route.cursor >= route.hops.length) route.cursor = 0;
-              route.updatedAt = now();
-              mgr.markDirty();
-              ctx.ui.notify(`Removed hop ${idx}.`, "info");
-              break;
-            }
-            case "Change a hop": {
-              const hopLabels = route.hops.map((h, i) => `${i}: ${h.provider}/${h.model || "*"}`);
-              const hp = await ctx.ui.select("Change which hop?", hopLabels);
-              if (!hp) break;
-              const idx = parseInt(hp.split(":")[0]);
-              const authList = ctx.modelRegistry.authStorage.list();
-              const providers = [...new Set(authList)].filter(p => p).sort();
-              const provPick = await ctx.ui.select("New provider:", providers);
-              if (!provPick) break;
-              const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === provPick) as any[];
-              const modelOpts = ["(same model)", ...models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`)];
-              const modelPick = await ctx.ui.select("New model:", modelOpts);
-              if (!modelPick) break;
-              const mi = modelOpts.indexOf(modelPick);
-              const model = mi > 0 ? (models[mi - 1]?.id || "") : "";
-              route.hops[idx] = { provider: provPick, model };
-              route.updatedAt = now();
-              mgr.markDirty();
-              ctx.ui.notify(`Changed hop ${idx} to ${provPick}/${model || "*"}.`, "info");
-              break;
-            }
-          }
-        }
+        await editRoute(mgr, route, ctx);
         break;
       }
 
