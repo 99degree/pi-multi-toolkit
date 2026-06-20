@@ -855,3 +855,70 @@ function getSelectableModelsForProvider(ctx: ExtensionCommandContext, providerNa
   const all = Array.from(new Map([...registry, ...json, ...system, ...tmpl].map((m) => [m.id, m])).values());
   return [...all].map((m) => m.id);
 }
+
+// ===========================================================================
+// Unified model switching
+// ===========================================================================
+
+/**
+ * Get all model objects for a given provider name from the registry.
+ */
+export function getModelsForProvider(ctx: { modelRegistry: { getAll(): any[] } }, provider: string): any[] {
+  return ctx.modelRegistry.getAll().filter((m: any) => m.provider === provider) as any[];
+}
+
+/**
+ * Interactive: let user pick a model from a provider, then switch to it.
+ * Returns true if switch succeeded.
+ */
+export async function pickAndSwitchModel(
+  pi: { setModel(model: any): Promise<boolean> },
+  ctx: { modelRegistry: { getAll(): any[] }; ui: { select(message: string, options: string[]): Promise<string | undefined>; notify(message: string, level: string): void; setStatus?(key: string, value: string): void } },
+  provider: string,
+): Promise<boolean> {
+  const models = getModelsForProvider(ctx, provider);
+  if (!models.length) {
+    ctx.ui.notify(`No models for "${provider}".`, "info");
+    return false;
+  }
+  const labels = models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`);
+  const picked = await ctx.ui.select(`Models for ${provider}:`, labels);
+  if (!picked) return false;
+  const mi = labels.indexOf(picked);
+  const target = mi >= 0 ? models[mi] : models[0];
+  return doSwitchModel(pi, ctx, target);
+}
+
+/**
+ * Programmatic: switch to a specific model by provider + modelId.
+ * If no modelId, picks the first available model for that provider.
+ */
+export async function switchToModel(
+  pi: { setModel(model: any): Promise<boolean> },
+  ctx: { modelRegistry: { getAll(): any[] }; ui: { notify(message: string, level: string): void; setStatus?(key: string, value: string): void } },
+  provider: string,
+  modelId?: string,
+  fallbackModelId?: string,
+): Promise<boolean> {
+  const models = getModelsForProvider(ctx, provider);
+  if (!models.length) return false;
+  const id = modelId || fallbackModelId || "";
+  const target = id ? models.find((m: any) => m.id === id) || models[0] : models[0];
+  return doSwitchModel(pi, ctx, target);
+}
+
+/** Execute the actual model switch. */
+async function doSwitchModel(
+  pi: { setModel(model: any): Promise<boolean> },
+  ctx: { ui: { notify(message: string, level: string): void; setStatus?(key: string, value: string): void } },
+  target: any,
+): Promise<boolean> {
+  const ok = await pi.setModel(target);
+  if (ok) {
+    ctx.ui.notify(`Switched to ${target.provider}/${target.id}`, "info");
+    if (ctx.ui.setStatus) ctx.ui.setStatus("switch", target.provider);
+  } else {
+    ctx.ui.notify("Failed to switch model.", "error");
+  }
+  return ok;
+}

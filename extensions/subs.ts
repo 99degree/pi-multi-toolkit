@@ -16,7 +16,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import {
   SubEntry, MultiPassConfig, PROVIDER_TEMPLATES, registerSub,
   subProviderName, loadGlobalConfig, saveGlobalConfig,
-  normalizeEntries,
+  normalizeEntries, pickAndSwitchModel, switchToModel,
 } from "../shared.ts";
 
 // ---------------------------------------------------------------------------
@@ -83,22 +83,7 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
         if (idx < 0) break;
         const entry = subs[idx];
         const name = subProviderName(entry);
-
-        // Show models under selected provider
-        const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === name) as any[];
-        if (!models.length) { ctx.ui.notify(`No models for "${name}".`, "info"); break; }
-        const modelLabels = models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`);
-        const pickedModel = await ctx.ui.select(`Models for ${name}:`, modelLabels);
-        if (!pickedModel) break;
-        const mi = modelLabels.indexOf(pickedModel);
-        const target = mi >= 0 ? models[mi] : models[0];
-        const ok = await pi.setModel(target);
-        if (ok) {
-          ctx.ui.notify(`Switched to ${target.provider}/${target.id}`, "info");
-          ctx.ui.setStatus("subs-mgr", target.provider);
-        } else {
-          ctx.ui.notify("Failed.", "error");
-        }
+        await pickAndSwitchModel(pi, ctx, name);
         break;
       }
 
@@ -220,12 +205,7 @@ async function cmdSwitch(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: s
   const parts = args.trim().split(/\s+/);
   if (parts.length < 2) { ctx.ui.notify("Usage: /subs switch <name> [modelId]", "warning"); return; }
   const name = parts[1], modelId = parts[2];
-  const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === name) as any[];
-  if (!models.length) { ctx.ui.notify(`No models for "${name}".`, "error"); return; }
-  const target = modelId ? models.find((m: any) => m.id === modelId) || models[0] : models[0];
-  const ok = await pi.setModel(target);
-  ctx.ui.notify(ok ? `Switched to ${name} / ${target.id}` : "Failed.", ok ? "info" : "error");
-  if (ok) ctx.ui.setStatus("subs-mgr", name);
+  await switchToModel(pi, ctx, name, modelId);
 }
 
 // ---------------------------------------------------------------------------
