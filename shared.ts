@@ -782,6 +782,12 @@ export function registerSub(pi: ExtensionAPI, entry: SubEntry, ctx?: ExtensionCo
   const template = PROVIDER_TEMPLATES[entry.provider];
   if (!template) return;
   const name = subProviderName(entry);
+  // Skip if already registered by system (prevents overriding in newer pi versions)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if ((ctx as any)?.modelRegistry?.registeredProviders?.has(name)) {
+    console.log('[registerSub] skipping', name, '- already registered');
+    return;
+  }
   const oauth = template.buildOAuth(entry.index);
   const modifyModels = template.buildModifyModels?.(name);
   const sourceProvider = template.sourceProvider ?? entry.provider;
