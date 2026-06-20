@@ -8,33 +8,35 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
+function findAuthedProviders(ctx: ExtensionCommandContext): string[] {
+  const as = ctx.modelRegistry.authStorage;
+  const stored = as.list();
+  const storedBases = new Set(stored.map(n => n.replace(/-\d+$/, "")));
+  // Also check env-var-based providers from templates
+  const allModels = ctx.modelRegistry.getAll() as any[];
+  const allProvs = [...new Set(allModels.map((m: any) => m.provider))];
+  const envAuthed = allProvs.filter(p => {
+    const base = p.replace(/-\d+$/, "");
+    return !storedBases.has(base) && as.hasAuth(p);
+  }).map(p => p.replace(/-\d+$/, ""));
+  return [...new Set([...storedBases, ...envAuthed])].filter(Boolean).sort();
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("models", {
     description: "Switch model — pick a logged-in provider → pick a model → activate",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      const allAuth = ctx.modelRegistry.authStorage.list();
-      if (!allAuth.length) {
-        ctx.ui.notify("No logged-in providers. Login to one first.", "warning");
-        return;
-      }
-
-      // Unique base provider names (strip -N suffix)
-      const bases = [...new Set(allAuth.map(n => n.replace(/-\d+$/, "")))]
-        .filter(n => ctx.modelRegistry.getAll().some((m: any) =>
-          m.provider === n || m.provider === `${n}-0`
-        ))
-        .sort();
-
+      const as = ctx.modelRegistry.authStorage;
+      const bases = findAuthedProviders(ctx);
       if (!bases.length) {
-        ctx.ui.notify("No providers with models available.", "info");
+        ctx.ui.notify("No logged-in providers. Set an API key in env or login first.", "warning");
         return;
       }
 
       // Step 1: pick a provider
       const providerLabels = bases.map(b => {
-        const authed = allAuth.filter(a => a === b || a.startsWith(b + "-"));
-        const accounts = authed.map(a => ctx.modelRegistry.authStorage.hasAuth(a) ? "✓" : "○").join("");
-        return `${accounts} ${b}`;
+        const hasStored = as.list().some(a => a === b || a.startsWith(b + "-"));
+        return `${hasStored ? "✓" : "○"} ${b}`;
       });
       const picked = await ctx.ui.select("Select provider:", providerLabels);
       if (!picked) return;
@@ -43,7 +45,11 @@ export default function (pi: ExtensionAPI) {
       const provider = bases[idx];
 
       // Step 2: collect models from all auth'd accounts of this provider
-      const authedNames = allAuth.filter(a => a === provider || a.startsWith(provider + "-"));
+      const allModels = ctx.modelRegistry.getAll() as any[];
+      const authedNames = [...new Set(allModels.filter((m: any) => {
+        const p = m.provider;
+        return p === provider || p.startsWith(provider + "-");
+      }).map((m: any) => m.provider))];
       const allModels: any[] = [];
       const allLabels: string[] = [];
       for (const name of authedNames) {

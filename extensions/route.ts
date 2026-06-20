@@ -180,6 +180,20 @@ class RouteManager {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Return all provider names that have auth (stored, env, runtime). */
+function allAuthedProviders(ctx: ExtensionCommandContext): string[] {
+  const as = ctx.modelRegistry.authStorage;
+  const stored = as.list();
+  const allModels = ctx.modelRegistry.getAll() as any[];
+  const allProvs = [...new Set(allModels.map((m: any) => m.provider))];
+  const envAuthed = allProvs.filter(p => !stored.includes(p) && as.hasAuth(p));
+  return [...new Set([...stored, ...envAuthed])].filter(Boolean).sort();
+}
+
+// ---------------------------------------------------------------------------
 // Edit route — add/remove/change hops
 // ---------------------------------------------------------------------------
 
@@ -226,8 +240,7 @@ async function editRoute(mgr: RouteManager, route: RouteDef, ctx: ExtensionComma
         const hp = await ctx.ui.select("Change which hop?", hopLabels);
         if (!hp) break;
         const idx = parseInt(hp.split(":")[0]);
-        const authList = ctx.modelRegistry.authStorage.list();
-        const providers = [...new Set(authList)].filter(p => p).sort();
+        const providers = allAuthedProviders(ctx);
         const provPick = await ctx.ui.select("New provider:", providers);
         if (!provPick) break;
         const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === provPick) as any[];
@@ -300,9 +313,7 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, mgr: Rou
         const name = await ctx.ui.input("Route name:", "e.g. fallback, primary");
         if (!name?.trim()) break;
         // Get list of provisioned providers for picking
-        const authList = ctx.modelRegistry.authStorage.list();
-        const subs = new Set(authList);
-        const providers = [...subs].filter(p => p).sort();
+        const providers = allAuthedProviders(ctx);
         if (!providers.length) { ctx.ui.notify("No provisioned providers found. Login to a provider first.", "info"); break; }
         // Collect hops
         const hops: RouteHop[] = [];
@@ -407,7 +418,13 @@ export default function (pi: ExtensionAPI) {
   /** Ensure mgr is initialized before handling events */
   async function ensureInit(ctx: ExtensionContext): Promise<RouteManager> {
     const m = await init();
-    m.getAuthList = () => ctx.modelRegistry.authStorage.list();
+    m.getAuthList = () => {
+      const stored = ctx.modelRegistry.authStorage.list();
+      const allModels = ctx.modelRegistry.getAll() as any[];
+      const allProvs = [...new Set(allModels.map((m: any) => m.provider))];
+      const envAuthed = allProvs.filter(p => ctx.modelRegistry.authStorage.hasAuth(p));
+      return [...new Set([...stored, ...envAuthed])];
+    };
     return m;
   }
 
@@ -463,7 +480,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Check if target provider has auth; if not, prompt for login
-    const authedProviders = ctx.modelRegistry.authStorage.list();
+    const authedProviders = allAuthedProviders(ctx);
     if (!authedProviders.includes(next.provider)) {
       ctx.ui.notify(`Failover target ${next.provider} needs auth — login required`, "warning");
       // Try to auto-login via subs extension
@@ -530,7 +547,13 @@ Open ${info.verificationUri}`, "info"),
     description: "Manage failover routing — interactive menu (no args) or direct commands.",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       const m = await init();
-      m.getAuthList = () => ctx.modelRegistry.authStorage.list();
+      m.getAuthList = () => {
+        const stored = ctx.modelRegistry.authStorage.list();
+        const allModels = ctx.modelRegistry.getAll() as any[];
+        const allProvs = [...new Set(allModels.map((m: any) => m.provider))];
+        const envAuthed = allProvs.filter(p => ctx.modelRegistry.authStorage.hasAuth(p));
+        return [...new Set([...stored, ...envAuthed])];
+      };
 
       const parts = _args.trim().split(/\s+/).filter(Boolean);
       const sub = parts[0]?.toLowerCase();

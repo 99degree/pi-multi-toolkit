@@ -104,13 +104,11 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 
       // ── Clone ──
       case choices[1]: {
-        // Find all logged-in providers (by unique base name from auth storage)
-        const allAuthNames = ctx.modelRegistry.authStorage.list();
-        const baseNames = [...new Set(allAuthNames.map(n => n.replace(/-\d+$/, "")))]
-          .filter(n => PROVIDER_TEMPLATES[n])
-          .sort();
+        // Find all logged-in providers (using hasAuth which checks env + stored)
+        const as = ctx.modelRegistry.authStorage;
+        const baseNames = Object.keys(PROVIDER_TEMPLATES).filter(p => as.hasAuth(p)).sort();
         if (!baseNames.length) {
-          ctx.ui.notify("No logged-in providers to clone. Login to a provider first.", "info");
+          ctx.ui.notify("No logged-in providers to clone. Login or set API key env var first.", "info");
           break;
         }
         const pick = await ctx.ui.select("Clone which provider?", baseNames);
@@ -180,11 +178,9 @@ async function cmdClone(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: st
   if (!PROVIDER_TEMPLATES[provider]) { ctx.ui.notify(`Unknown provider "${provider}".`, "error"); return; }
 
   const cfg = loadGlobalConfig();
-  // Check if any auth entry exists for this provider (name or name-N)
-  const allAuth = ctx.modelRegistry.authStorage.list();
-  const hasAnyAuth = allAuth.some(a => a === provider || a.startsWith(provider + "-"));
-  if (!hasAnyAuth) {
-    ctx.ui.notify(`"${provider}" is not logged in. Login to it first.`, "warning");
+  // Check if provider has any auth (env, stored, or runtime)
+  if (!ctx.modelRegistry.authStorage.hasAuth(provider)) {
+    ctx.ui.notify(`"${provider}" is not logged in. Set API key env var or login first.`, "warning");
     return;
   }
 
