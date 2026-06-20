@@ -778,6 +778,7 @@ export function cloneModels(originalProvider: string, index: number, ctx?: Exten
 // ===========================================================================
 
 export function registerSub(pi: ExtensionAPI, entry: SubEntry, ctx?: ExtensionContext) {
+  console.log('[registerSub] called for:', entry.provider, 'index:', entry.index);
   const template = PROVIDER_TEMPLATES[entry.provider];
   if (!template) return;
   const name = subProviderName(entry);
@@ -797,6 +798,7 @@ export function registerSub(pi: ExtensionAPI, entry: SubEntry, ctx?: ExtensionCo
   const cloned = baseArr.length > 0 ? cloneModels(sourceProvider, entry.index, ctx, aliasProvider) : [];
   const models = Array.from(new Map([...cloned, ...templateModels].map((m) => [m.id, m])).values()) as Iterable<Model<Api>>;
 
+  console.log('[registerSub] registering provider:', name, 'models:', models?.length || 'unknown');
   pi.registerProvider(name, {
     baseUrl,
     api,

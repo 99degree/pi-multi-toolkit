@@ -113,30 +113,41 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 
       // ── Add ──
       case choices[1]: {
-        // Shortlist: system-authenticated providers + already-registered subs
-        const authed = ctx.modelRegistry.authStorage.list();
-        const registered = new Set(cfg.subscriptions.map(s => s.provider));
-        const provisioned = [...new Set([...authed, ...registered])].filter(p => PROVIDER_TEMPLATES[p]).sort();
-        if (!provisioned.length) {
-          ctx.ui.notify("No provisioned providers found. Login to a system provider first.", "info");
-          break;
-        }
-        const pick = await ctx.ui.select("Choose provisioned provider:", provisioned);
-        if (!pick) break;
-        const pname = pick.toLowerCase();
+        // Show all known providers with auth status
+        const allProviders = Object.keys(PROVIDER_TEMPLATES).sort();
+        const authed = new Set(ctx.modelRegistry.authStorage.list());
+        const labelMap = new Map<string, string>();
+        const labels = allProviders.map(p => {
+          const hasAuth = authed.has(p) ? "✓" : " ";
+          const label = `${hasAuth} ${p}`;
+          labelMap.set(label, p);
+          return label;
+        });
+        const pickedLabel = await ctx.ui.select("Choose provider:", labels);
+        if (!pickedLabel) break;
+        const pname = labelMap.get(pickedLabel) || pickedLabel.trim();
         const existing = cfg.subscriptions.filter(s => s.provider === pname);
-        if (existing.length === 0) {
-          cfg.subscriptions.push({ provider: pname, index: 0 });
+
+        // Determine the entry: new or clone
+        const idx = existing.length > 0 ? nextCloneIndex(pname, cfg.subscriptions) : 0;
+        const entry: SubEntry = { provider: pname, index: idx };
+
+        // Register first so OAuth config is available for login
+        cfg.subscriptions.push(entry);
+        saveGlobalConfig(cfg);
+        registerSub(pi, entry, (ctx as any));
+
+        // Chain login immediately: if it fails or user cancels, roll back
+        const subName = subProviderName(entry);
+        const ok = await systemLogin(ctx, subName);
+        if (!ok) {
+          cfg.subscriptions.splice(cfg.subscriptions.indexOf(entry), 1);
           saveGlobalConfig(cfg);
-          registerSub(pi, { provider: pname, index: 0 }, (ctx as any));
-          ctx.ui.notify(`Registered additional provider "${pname}". Use [Login] to authenticate.`, "info");
+          try { ctx.modelRegistry.authStorage.logout(subName); } catch { /* ignore */ }
+          ctx.modelRegistry.refresh();
+          ctx.ui.notify(`Canceled: "${subName}" not registered.`, "warning");
         } else {
-          const idx = nextCloneIndex(pname, cfg.subscriptions);
-          const entry: SubEntry = { provider: pname, index: idx };
-          cfg.subscriptions.push(entry);
-          saveGlobalConfig(cfg);
-          registerSub(pi, entry, (ctx as any));
-          ctx.ui.notify(`Added clone ${subProviderName(entry)}.`, "info");
+          ctx.ui.notify(`Added and logged in: "${subName}".`, "info");
         }
         break;
       }
@@ -250,19 +261,28 @@ async function cmdAdd(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
   if (!template) { ctx.ui.notify(`Unknown provider "${provider}".`, "error"); return; }
   const cfg = loadGlobalConfig();
   const existing = cfg.subscriptions.filter(s => s.provider === provider);
-  if (existing.length === 0) {
-    cfg.subscriptions.push({ provider, index: 0, label });
+
+  // Determine entry: new or clone
+  const idx = existing.length > 0 ? nextCloneIndex(provider, cfg.subscriptions) : 0;
+  const entry: SubEntry = { provider, index: idx, label };
+
+  // Register first so OAuth config is available
+  cfg.subscriptions.push(entry);
+  saveGlobalConfig(cfg);
+  registerSub(pi, entry, (ctx as any));
+
+  // Chain login immediately — roll back if it fails
+  const subName = subProviderName(entry);
+  const ok = await systemLogin(ctx, subName);
+  if (!ok) {
+    cfg.subscriptions.splice(cfg.subscriptions.indexOf(entry), 1);
     saveGlobalConfig(cfg);
-    registerSub(pi, { provider, index: 0, label }, (ctx as any));
-    ctx.ui.notify(`Registered "${provider}". Use /subs login ${provider}.`, "info");
-  } else {
-    const index = nextCloneIndex(provider, cfg.subscriptions);
-    const entry: SubEntry = { provider, index, label };
-    cfg.subscriptions.push(entry);
-    saveGlobalConfig(cfg);
-    registerSub(pi, entry, (ctx as any));
-    ctx.ui.notify(`Added clone ${subProviderName(entry)}.`, "info");
+    try { ctx.modelRegistry.authStorage.logout(subName); } catch { /* ignore */ }
+    ctx.modelRegistry.refresh();
+    ctx.ui.notify(`Canceled: "${subName}" not registered.`, "warning");
+    return;
   }
+  ctx.ui.notify(`Added and logged in: "${subName}".`, "info");
 }
 
 async function cmdRemove(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void> {
