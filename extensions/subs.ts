@@ -13,19 +13,92 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { OAuthLoginCallbacks, OAuthPrompt, OAuthAuthInfo, OAuthDeviceCodeInfo, OAuthSelectPrompt } from "@earendil-works/pi-ai/oauth";
 import {
   SubEntry, MultiPassConfig, PROVIDER_TEMPLATES, registerSub,
   subProviderName, loadGlobalConfig, saveGlobalConfig,
   normalizeEntries,
 } from "../shared.ts";
-import {
-  isSystemProvider, resolveEntry, nextCloneIndex,
-  systemLogin, altKeyLogin, describeModels,
-} from "./provider.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function isSystemProvider(name: string): boolean {
+  return !!PROVIDER_TEMPLATES[name];
+}
+
+function resolveEntry(name: string, cfg: MultiPassConfig): SubEntry | undefined {
+  return cfg.subscriptions.find(s => subProviderName(s) === name || s.provider === name);
+}
+
+function nextCloneIndex(provider: string, subs: SubEntry[]): number {
+  const existing = subs.filter(s => s.provider === provider);
+  return existing.length ? Math.max(...existing.map(s => s.index)) + 1 : 1;
+}
+
+function buildCallbacks(ctx: ExtensionCommandContext): OAuthLoginCallbacks {
+  return {
+    onAuth: (info: OAuthAuthInfo) => ctx.ui.notify(`Open:\n${info.url}${info.instructions ? `\n${info.instructions}` : ""}`, "info"),
+    onDeviceCode: (info: OAuthDeviceCodeInfo) => ctx.ui.notify(`Code: ${info.userCode}\nOpen ${info.verificationUri}`, "info"),
+    onPrompt: async (p: OAuthPrompt) => (await ctx.ui.input(p.message, p.placeholder || "")) || "",
+    onProgress: (m: string) => ctx.ui.notify(m, "info"),
+    onManualCodeInput: async () => (await ctx.ui.input("Auth code:", "")) || "",
+    onSelect: async (p: OAuthSelectPrompt) => ctx.ui.select(p.message, p.options.map(o => o.label)),
+  };
+}
+
+async function systemLogin(ctx: ExtensionCommandContext, subName: string): Promise<boolean> {
+  try {
+    await ctx.modelRegistry.authStorage.login(subName, buildCallbacks(ctx));
+    ctx.modelRegistry.refresh();
+    return true;
+  } catch {
+    const key = await ctx.ui.input(`API key for ${subName}:`, "");
+    if (!key?.trim()) { ctx.ui.notify("Canceled.", "info"); return false; }
+    ctx.modelRegistry.authStorage.set(subName, { type: "api_key", key: key.trim() });
+    ctx.modelRegistry.refresh();
+    return true;
+  }
+}
+
+async function altKeyLogin(ctx: ExtensionCommandContext, subName: string): Promise<boolean> {
+  const key = await ctx.ui.input(`Alternative API key for ${subName}:`, "");
+  if (!key?.trim()) { ctx.ui.notify("Canceled.", "info"); return false; }
+  ctx.modelRegistry.authStorage.set(subName, { type: "api_key", key: key.trim() });
+  ctx.modelRegistry.refresh();
+  return true;
+}
+
+function describeProvider(provider: string): string {
+  const t = PROVIDER_TEMPLATES[provider];
+  if (!t) return `Unknown provider "${provider}".`;
+  const lines: string[] = [];
+  lines.push(`Provider: ${t.displayName || provider}`);
+  if (t.useOAuth === false || t.builtinOAuth?.name?.includes?.("API key")) {
+    lines.push("Auth:     API key");
+  } else if (t.builtinOAuth) {
+    lines.push("Auth:     OAuth");
+  } else {
+    lines.push("Auth:     ?");
+  }
+  if (t.sourceProvider) lines.push(`Source:   ${t.sourceProvider}`);
+  const models = t.models || [];
+  const builtin = t.builtinModels?.() || [];
+  const all = [...models, ...builtin];
+  if (all.length > 0) {
+    const reasonCount = all.filter((m: any) => m.reasoning).length;
+    lines.push(`Models:   ${all.length} available${reasonCount > 0 ? ` (${reasonCount} with reasoning)` : ""}`);
+    const baseUrl = all.find((m: any) => m.baseUrl)?.baseUrl;
+    if (baseUrl) lines.push(`API:      ${baseUrl}`);
+    lines.push("");
+    lines.push(all.slice(0, 5).map((m: any) => `  ${m.id}${m.reasoning ? " (reasoning)" : ""}`).join("\n")
+      + (all.length > 5 ? `\n  … and ${all.length - 5} more` : ""));
+  } else {
+    lines.push("Models:   (loaded from system — not pre-defined)");
+  }
+  return lines.join("\n");
+}
 
 function managedSubs(cfg: MultiPassConfig): SubEntry[] {
   return normalizeEntries(cfg.subscriptions).filter(s => s.index > 0 || !isSystemProvider(s.provider));
@@ -93,8 +166,8 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
           break;
         }
 
-        // Show available models before adding
-        ctx.ui.notify(`Available models for ${pname}:\n${describeModels(pname)}`, "info");
+        // Show provider info before adding
+        ctx.ui.notify(describeProvider(pname), "info");
 
         const entry: SubEntry = { provider: pname, index: 0 };
         cfg.subscriptions.push(entry);
@@ -217,7 +290,7 @@ async function cmdAdd(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: stri
   const template = PROVIDER_TEMPLATES[provider];
   if (!template) { ctx.ui.notify(`Unknown provider "${provider}".`, "error"); return; }
 
-  ctx.ui.notify(`Available models for ${provider}:\n${describeModels(provider)}`, "info");
+  ctx.ui.notify(describeProvider(provider), "info");
 
   const cfg = loadGlobalConfig();
   const existing = cfg.subscriptions.filter(s => s.provider === provider);
