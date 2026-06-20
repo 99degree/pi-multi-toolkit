@@ -393,11 +393,13 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, mgr: Rou
  * Find a Model object for the given provider and model ID.
  * If modelId is empty/undefined, returns the first available model for that provider.
  */
-function resolveModel(ctx: ExtensionContext, provider: string, modelId: string): Model<Api> | undefined {
+function resolveModel(ctx: ExtensionContext, provider: string, modelId: string, fallbackModelId?: string): Model<Api> | undefined {
   const models = ctx.modelRegistry.getAll().filter((m: any) => m.provider === provider) as Model<Api>[];
   if (!models.length) return undefined;
-  if (!modelId) return models[0];
-  return models.find(m => m.id === modelId) || models[0];
+  // Empty modelId means "same model" — try to find matching fallback ID first
+  const id = modelId || fallbackModelId || "";
+  if (!id) return models[0];
+  return models.find(m => m.id === id) || models[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +475,7 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
 
-    const targetModel = resolveModel(ctx, next.provider, next.model);
+    const targetModel = resolveModel(ctx, next.provider, next.model, currentModel.id);
     if (!targetModel) {
       ctx.ui.notify(`Failover: next hop ${next.provider}/${next.model} has no registered model.`, "error");
       return false;
