@@ -14,6 +14,8 @@
  * runs through pi's built-in compact() flow.
  */
 import type { ExtensionAPI, ExtensionCommandContext, SessionBeforeCompactEvent, SessionCompactEvent } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
 // ---------------------------------------------------------------------------
 // Activity detection
@@ -188,6 +190,80 @@ async function handleCompactStats(ctx: ExtensionCommandContext): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// AGENTS.md discovery (mirrors pi's resource-loader.ts logic)
+// ---------------------------------------------------------------------------
+
+/** Candidates checked by pi for context files. */
+const CONTEXT_FILE_CANDIDATES = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+
+/**
+ * Read the first matching context file from dir, or undefined if none found.
+ * Matches pi's loadContextFileFromDir() logic.
+ */
+async function readContextFileFromDir(dir: string): Promise<string | null> {
+  for (const name of CONTEXT_FILE_CANDIDATES) {
+    try {
+      const filePath = path.join(dir, name);
+      await fs.access(filePath);
+      return await fs.readFile(filePath, "utf-8");
+    } catch {
+      // not found — try next candidate
+    }
+  }
+  return null;
+}
+
+/**
+ * Discover AGENTS.md content, matching pi's loadProjectContextFiles():
+ * 1. Check cwd
+ * 2. Walk up ancestor dirs (pi walks to root; we cap at 10 levels for safety)
+ * 3. Fall back to agentDir (~/.pi)
+ * Returns first match found.
+ */
+async function discoverAgentsMd(cwd: string, agentDir: string): Promise<string | null> {
+  // 1. cwd (and its ancestors)
+  let current = cwd;
+  for (let i = 0; i < 10; i++) {
+    const content = await readContextFileFromDir(current);
+    if (content !== null) return content;
+
+    const parent = path.resolve(current, "..");
+    if (parent === current) break; // reached root
+    current = parent;
+  }
+
+  // 2. agentDir (~/.pi)
+  try {
+    const content = await readContextFileFromDir(agentDir);
+    if (content !== null) return content;
+  } catch {
+    // no agents.md in agentDir either
+  }
+
+  return null;
+}
+
+/**
+ * Build the constraints reminder for summarization.
+ * If AGENTS.md content was found, prepend it so the summarizer knows
+ * the operational directives that governed the session.
+ */
+function buildAgentsMdReminder(agentsMdContent: string | null): string {
+  if (!agentsMdContent) return "";
+
+  const trimmed = agentsMdContent.trim();
+  if (!trimmed) return "";
+
+  return `
+
+## Operational Directives (from AGENTS.md)
+
+The conversation below was governed by these directives. Preserve ALL rules, constraints, and patterns described in the summary output so that the summary is self-contained and another LLM reading only the summary understands the full operational context.
+
+${trimmed}`;
+}
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -214,18 +290,30 @@ export default function (pi: ExtensionAPI) {
 
   // ── session_before_compact: auto-inject smart instructions ──
   pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: any) => {
-    // If user already passed custom instructions (via /compact), use those — don't override
-    if (event.customInstructions && event.customInstructions.trim().length > 0) {
-      return; // passthrough — user's instructions take priority
-    }
+    // If user already passed custom instructions (via /compact), use those — use those AND
+    // still inject AGENTS.md directives so the summarizer respects the operational constraints
+    const userInstructions = (event.customInstructions || "").trim();
 
-    // Auto-detect activity type and inject style-based instructions
+    // Discover AGENTS.md content (mirrors pi's resource-loader discovery order:
+    // cwd → ancestors → ~/.pi/agent)
+    const agentDir = ctx.sessionManager?.agentDir
+      ?? path.join(process.env.HOME || "/data/data/com.termux/files/home", ".pi");
+    const cwd = ctx.cwd || process.cwd();
+    const agentsMdContent = await discoverAgentsMd(cwd, agentDir);
+    const agentsMdReminder = buildAgentsMdReminder(agentsMdContent);
+
+    // Auto-detect activity type and build style instructions
     const activityType = detectActivityType(event.branchEntries);
     lastDetectedActivity = activityType;
-    const instructions = buildInstructionsFromActivity(activityType);
+    const styleInstructions = buildInstructionsFromActivity(activityType);
 
-    // Mutate event.customInstructions in-place — it gets forwarded to compact()
-    (event as any).customInstructions = instructions;
+    // Compose: AGENTS.md directives first, then style instructions, then user focus
+    const allInstructions = [agentsMdReminder, styleInstructions, userInstructions]
+      .filter(Boolean)
+      .join("\n\n");
+
+    // Mutate event.customInstructions in-place — forwarded to compact()
+    (event as any).customInstructions = allInstructions;
   });
 
   // ── session_compact: stats notification ──
