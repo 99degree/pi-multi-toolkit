@@ -23,8 +23,7 @@ async function getOrCreateSessionId(): Promise<string> {
 export default function (pi: ExtensionAPI) {
   let sessionId = "";
 
-  pi.on("session_start", async (_event: any, ctx: any) => {
+  pi.on("session_start", async (_event: any, _ctx: any) => {
     sessionId = await getOrCreateSessionId();
-    ctx.ui.setStatus("session-id", sessionId.slice(0, 16));
   });
 }
