@@ -10,6 +10,7 @@
       "./extensions/subs.ts",
       "./extensions/route.ts",
       "./extensions/session-id.ts",
+      "./extensions/mistral-fix.ts",
       "./extensions/agents-md.ts",
       "./extensions/search-tool.ts",
       "./extensions/models.ts"
