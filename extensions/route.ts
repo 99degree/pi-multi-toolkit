@@ -247,7 +247,8 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, mgr: Rou
               const modelOpts = ["(same model)", ...models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`)];
               const modelPick = await ctx.ui.select("Pick model:", modelOpts);
               if (!modelPick) break;
-              const model = modelPick === "(same model)" ? "" : (models.find((m: any) => modelOpts.slice(1).includes(`${m.id}${m.reasoning ? " (reasoning)" : ""}`))?.id || "");
+              const mi = modelOpts.indexOf(modelPick);
+              const model = mi > 0 ? (models[mi - 1]?.id || "") : "";
               route.hops.push({ provider: provPick, model });
               route.updatedAt = now();
               mgr.markDirty();
@@ -280,7 +281,8 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext, mgr: Rou
               const modelOpts = ["(same model)", ...models.map((m: any) => `${m.id}${m.reasoning ? " (reasoning)" : ""}`)];
               const modelPick = await ctx.ui.select("New model:", modelOpts);
               if (!modelPick) break;
-              const model = modelPick === "(same model)" ? "" : (models.find((m: any) => modelOpts.slice(1).includes(`${m.id}${m.reasoning ? " (reasoning)" : ""}`))?.id || "");
+              const mi = modelOpts.indexOf(modelPick);
+              const model = mi > 0 ? (models[mi - 1]?.id || "") : "";
               route.hops[idx] = { provider: provPick, model };
               route.updatedAt = now();
               mgr.markDirty();
