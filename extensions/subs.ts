@@ -24,10 +24,6 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function isSystemProvider(name: string): boolean {
-  return !!PROVIDER_TEMPLATES[name];
-}
-
 function resolveEntry(name: string, cfg: MultiPassConfig): SubEntry | undefined {
   return cfg.subscriptions.find(s => subProviderName(s) === name || s.provider === name);
 }
@@ -101,7 +97,7 @@ function describeProvider(provider: string): string {
 }
 
 function managedSubs(cfg: MultiPassConfig): SubEntry[] {
-  return normalizeEntries(cfg.subscriptions).filter(s => s.index > 0 || !isSystemProvider(s.provider));
+  return normalizeEntries(cfg.subscriptions);
 }
 
 // ---------------------------------------------------------------------------

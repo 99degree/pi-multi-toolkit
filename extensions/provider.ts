@@ -14,19 +14,15 @@ import {
   parseEnvConfig, mergeConfigs, normalizeEntries,
 } from "../shared.ts";
 
-function isManaged(sub: SubEntry): boolean {
-  return sub.index > 0 || !PROVIDER_TEMPLATES[sub.provider];
-}
-
 export default function (pi: ExtensionAPI) {
   const cfg = loadGlobalConfig();
-  for (const sub of normalizeEntries(mergeConfigs(cfg, parseEnvConfig())).filter(isManaged)) {
+  for (const sub of normalizeEntries(mergeConfigs(cfg, parseEnvConfig()))) {
     registerSub(pi, sub);
   }
 
   pi.on("session_start", async (_event: any, ctx: any) => {
     const eff = loadEffectiveConfig(ctx.cwd);
-    for (const sub of eff.subscriptions.filter((s: SubEntry) => isManaged(s))) {
+    for (const sub of eff.subscriptions) {
       registerSub(pi, sub, ctx);
     }
   });
