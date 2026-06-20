@@ -104,17 +104,16 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 
       // ── Clone ──
       case choices[1]: {
-        const parents = [...new Set(cfg.subscriptions.filter(s => s.index === 0).map(s => s.provider))].sort();
-        if (!parents.length) {
-          ctx.ui.notify("No base providers. Use [Add provider] first.", "info");
+        // Find all logged-in providers (by unique base name from auth storage)
+        const allAuthNames = ctx.modelRegistry.authStorage.list();
+        const baseNames = [...new Set(allAuthNames.map(n => n.replace(/-\d+$/, "")))]
+          .filter(n => PROVIDER_TEMPLATES[n])
+          .sort();
+        if (!baseNames.length) {
+          ctx.ui.notify("No logged-in providers to clone. Login to a provider first.", "info");
           break;
         }
-        const loggedIn = parents.filter(p => ctx.modelRegistry.authStorage.hasAuth(subProviderName({ provider: p, index: 0 })));
-        if (!loggedIn.length) {
-          ctx.ui.notify("No logged-in providers to clone. Use [Add provider] to login first.", "info");
-          break;
-        }
-        const pick = await ctx.ui.select("Clone which provider?", loggedIn);
+        const pick = await ctx.ui.select("Clone which provider?", baseNames);
         if (!pick) break;
 
         const idx = nextCloneIndex(pick, cfg.subscriptions);
@@ -181,15 +180,11 @@ async function cmdClone(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: st
   if (!PROVIDER_TEMPLATES[provider]) { ctx.ui.notify(`Unknown provider "${provider}".`, "error"); return; }
 
   const cfg = loadGlobalConfig();
-  const parent = cfg.subscriptions.find(s => s.provider === provider && s.index === 0);
-  if (!parent) {
-    ctx.ui.notify(`"${provider}" has no base registration. Use /subs add ${provider} first.`, "info");
-    return;
-  }
-
-  const parentName = subProviderName({ provider, index: 0 });
-  if (!ctx.modelRegistry.authStorage.hasAuth(parentName)) {
-    ctx.ui.notify(`"${provider}" is not logged in. Use /subs add ${provider} or Login first.`, "warning");
+  // Check if any auth entry exists for this provider (name or name-N)
+  const allAuth = ctx.modelRegistry.authStorage.list();
+  const hasAnyAuth = allAuth.some(a => a === provider || a.startsWith(provider + "-"));
+  if (!hasAnyAuth) {
+    ctx.ui.notify(`"${provider}" is not logged in. Login to it first.`, "warning");
     return;
   }
 
