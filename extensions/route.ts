@@ -409,6 +409,7 @@ function resolveModel(ctx: ExtensionContext, provider: string, modelId: string, 
 export default function (pi: ExtensionAPI) {
   let mgr: RouteManager | null = null;
   let initP: Promise<void> | null = null;
+  let pendingSwitch: { routeName: string; provider: string; model: string } | null = null;
 
   async function init(): Promise<RouteManager> {
     if (mgr) return mgr;
@@ -523,6 +524,26 @@ Open ${info.verificationUri}`, "info"),
     }
   }
 
+  // ── Before provider request: apply pending route switch ──
+  pi.on("before_provider_request", async (_event: any, ctx: ExtensionContext) => {
+    if (!pendingSwitch) return;
+    const ps = pendingSwitch;
+    pendingSwitch = null;
+
+    const targetModel = resolveModel(ctx, ps.provider, ps.model, ctx.model?.id);
+    if (!targetModel) {
+      ctx.ui.notify(`Pending switch: no model found for ${ps.provider}/${ps.model || "*"}.`, "error");
+      return;
+    }
+    const ok = await pi.setModel(targetModel);
+    if (ok) {
+      ctx.ui.notify(`Pending route "${ps.routeName}" applied: ${targetModel.provider}/${targetModel.id}`, "info");
+      ctx.ui.setStatus("route", targetModel.provider);
+    } else {
+      ctx.ui.notify(`Pending route "${ps.routeName}" failed.`, "error");
+    }
+  });
+
   // ── Fast path: detect 429 HTTP responses ──
   pi.on("after_provider_response", async (event: any, ctx: ExtensionContext) => {
     if (event.status !== 429) return;
@@ -571,6 +592,7 @@ Open ${info.verificationUri}`, "info"),
           "  remove <name>\n" +
           "  toggle <name>      Pause/resume\n" +
           "  reset <name>       Reset cursor to first hop\n" +
+          "  switch <name>      Schedule switch to route on next API call\n" +
           "Clone auto-route: providers with clones auto-rotate on failure.",
           "info");
         return;
@@ -612,6 +634,18 @@ Open ${info.verificationUri}`, "info"),
           if (!n) { ctx.ui.notify("Usage: /route reset <name>", "warning"); return; }
           const r = m.reset(n);
           ctx.ui.notify(typeof r === "string" ? r : `"${n}" reset.`, "info");
+          break;
+        }
+        case "switch": {
+          const n = parts[1];
+          if (!n) { ctx.ui.notify("Usage: /route switch <name>", "warning"); return; }
+          const r = m.get(n);
+          if (!r) { ctx.ui.notify(`Route "${n}" not found.`, "error"); break; }
+          if (r.paused) { ctx.ui.notify(`Route "${n}" is paused. Resume it first.`, "warning"); break; }
+          const hop = r.hops[r.cursor];
+          if (!hop) { ctx.ui.notify(`Route "${n}" has no hops.`, "error"); break; }
+          pendingSwitch = { routeName: n, provider: hop.provider, model: hop.model };
+          ctx.ui.notify(`Pending switch to route "${n}" (${hop.provider}/${hop.model || "*"}) — will apply on next API call.`, "info");
           break;
         }
         default:
