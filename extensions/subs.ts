@@ -138,11 +138,11 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
         break;
       }
 
-      // ── Remove ──
+      // ── Remove (clones only) ──
       case choices[3]: {
-        const subs = managedSubs(cfg);
-        if (!subs.length) { ctx.ui.notify("Nothing to remove.", "info"); break; }
-        const names = subs.map(s => subProviderName(s));
+        const clones = managedSubs(cfg).filter(s => s.index > 0);
+        if (!clones.length) { ctx.ui.notify("No clones to remove.", "info"); break; }
+        const names = clones.map(s => subProviderName(s));
         const pick = await ctx.ui.select("Remove which sub?", names);
         if (!pick) break;
         const entry = resolveEntry(pick, cfg);
@@ -216,6 +216,7 @@ async function cmdRemove(ctx: ExtensionCommandContext, args: string): Promise<vo
   const cfg = loadGlobalConfig();
   const entry = resolveEntry(name, cfg);
   if (!entry) { ctx.ui.notify(`Not found: "${name}".`, "error"); return; }
+  if (entry.index === 0) { ctx.ui.notify(`"${name}" is a base provider. Only clones can be removed.`, "warning"); return; }
   const subName = subProviderName(entry);
   cfg.subscriptions.splice(cfg.subscriptions.indexOf(entry), 1);
   saveGlobalConfig(cfg);
