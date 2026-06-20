@@ -190,7 +190,13 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
           ctx.ui.notify("No base providers. Use [Add provider] first.", "info");
           break;
         }
-        const pick = await ctx.ui.select("Clone which provider?", parents);
+        // Filter to only logged-in providers
+        const loggedIn = parents.filter(p => ctx.modelRegistry.authStorage.hasAuth(subProviderName({ provider: p, index: 0 })));
+        if (!loggedIn.length) {
+          ctx.ui.notify("No logged-in providers. Use [Add provider] to login first.", "info");
+          break;
+        }
+        const pick = await ctx.ui.select("Clone which provider?", loggedIn);
         if (!pick) break;
 
         const idx = nextCloneIndex(pick, cfg.subscriptions);
@@ -322,6 +328,12 @@ async function cmdCreate(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: s
   const parent = cfg.subscriptions.find(s => s.provider === provider && s.index === 0);
   if (!parent) {
     ctx.ui.notify(`"${provider}" has no base registration. Use /subs add ${provider} first.`, "info");
+    return;
+  }
+
+  const parentName = subProviderName({ provider, index: 0 });
+  if (!ctx.modelRegistry.authStorage.hasAuth(parentName)) {
+    ctx.ui.notify(`"${provider}" is not logged in. Use /subs add ${provider} or Login first.`, "warning");
     return;
   }
 
