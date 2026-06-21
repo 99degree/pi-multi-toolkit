@@ -7,54 +7,36 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import {
-  PROVIDER_TEMPLATES, getModelsForProvider, pickAndSwitchModel,
-  loadGlobalConfig, normalizeEntries,
-} from "../shared.ts";
+import { pickAndSwitchModel } from "../shared.ts";
 
-/** Return all provider base names from config + templates, with auth status. */
-function availableProviders(ctx: ExtensionCommandContext): { name: string; authed: boolean }[] {
+/** Return only logged-in provider base names (short list). */
+function authedProviders(ctx: ExtensionCommandContext): string[] {
   const as = ctx.modelRegistry.authStorage;
-  const authNames = new Set(as.list());
   const names = new Set<string>();
-
-  // From subscription config
-  const cfg = loadGlobalConfig();
-  for (const s of normalizeEntries(cfg.subscriptions)) names.add(s.provider);
-  // All template providers
-  for (const p of Object.keys(PROVIDER_TEMPLATES)) names.add(p);
-
-  return [...names].filter(Boolean).sort().map(name => ({
-    name,
-    authed: authNames.has(name) || authNames.has(`${name}-0`) || as.hasAuth(name),
-  }));
+  for (const a of as.list()) names.add(a.replace(/-\d+$/, ""));
+  // Also check models that have auth (env var based)
+  const allModels = ctx.modelRegistry.getAll() as any[];
+  for (const m of allModels) names.add(m.provider.replace(/-\d+$/, ""));
+  return [...names].filter(Boolean).sort();
 }
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("models", {
-    description: "Switch model — pick a provider → pick a model → activate",
+    description: "Switch model — pick a logged-in provider → pick a model → activate",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      const provs = availableProviders(ctx);
-      if (!provs.length) { ctx.ui.notify("No providers available.", "info"); return; }
+      const names = authedProviders(ctx);
+      if (!names.length) { ctx.ui.notify("No logged-in providers. Set API key or login first.", "warning"); return; }
 
-      const picked = await ctx.ui.select("Select provider:",
-        provs.map(p => `${p.authed ? "✓" : "○"} ${p.name}`));
+      const picked = await ctx.ui.select("Select provider:", names);
       if (!picked) return;
-      const idx = provs.findIndex(p => `${p.authed ? "✓" : "○"} ${p.name}` === picked);
+      const idx = names.indexOf(picked);
       if (idx < 0) return;
-      const prov = provs[idx];
 
-      if (!prov.authed) {
-        ctx.ui.notify(`"${prov.name}" has no API key set. Use env var or login first.`, "warning");
-        return;
-      }
-
-      // Try all possible subscription names
-      for (const c of [prov.name, `${prov.name}-0`, `${prov.name}-1`]) {
+      for (const c of [picked, `${picked}-0`, `${picked}-1`]) {
         const ok = await pickAndSwitchModel(pi, ctx, c);
         if (ok) return;
       }
-      ctx.ui.notify(`No models for "${prov.name}".`, "info");
+      ctx.ui.notify(`No models for "${picked}".`, "info");
     },
   });
 }
