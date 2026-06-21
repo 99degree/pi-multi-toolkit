@@ -7,45 +7,54 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getModelsForProvider, pickAndSwitchModel } from "../shared.ts";
+import {
+  PROVIDER_TEMPLATES, getModelsForProvider, pickAndSwitchModel,
+  loadGlobalConfig, normalizeEntries,
+} from "../shared.ts";
 
-function findAuthedProviders(ctx: ExtensionCommandContext): string[] {
+/** Return all provider base names from config + templates, with auth status. */
+function availableProviders(ctx: ExtensionCommandContext): { name: string; authed: boolean }[] {
   const as = ctx.modelRegistry.authStorage;
-  const stored = as.list();
-  const storedBases = new Set(stored.map(n => n.replace(/-\d+$/, "")));
-  const allModels = ctx.modelRegistry.getAll() as any[];
-  const allProvs = [...new Set(allModels.map((m: any) => m.provider))];
-  const envAuthed = allProvs.filter(p => {
-    const base = p.replace(/-\d+$/, "");
-    return !storedBases.has(base) && as.hasAuth(p);
-  }).map(p => p.replace(/-\d+$/, ""));
-  return [...new Set([...storedBases, ...envAuthed])].filter(Boolean).sort();
+  const authNames = new Set(as.list());
+  const names = new Set<string>();
+
+  // From subscription config
+  const cfg = loadGlobalConfig();
+  for (const s of normalizeEntries(cfg.subscriptions)) names.add(s.provider);
+  // All template providers
+  for (const p of Object.keys(PROVIDER_TEMPLATES)) names.add(p);
+
+  return [...names].filter(Boolean).sort().map(name => ({
+    name,
+    authed: authNames.has(name) || authNames.has(`${name}-0`) || as.hasAuth(name),
+  }));
 }
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("models", {
-    description: "Switch model — pick a logged-in provider → pick a model → activate",
+    description: "Switch model — pick a provider → pick a model → activate",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      const as = ctx.modelRegistry.authStorage;
-      const bases = findAuthedProviders(ctx);
-      if (!bases.length) {
-        ctx.ui.notify("No logged-in providers. Set an API key in env or login first.", "warning");
+      const provs = availableProviders(ctx);
+      if (!provs.length) { ctx.ui.notify("No providers available.", "info"); return; }
+
+      const picked = await ctx.ui.select("Select provider:",
+        provs.map(p => `${p.authed ? "✓" : "○"} ${p.name}`));
+      if (!picked) return;
+      const idx = provs.findIndex(p => `${p.authed ? "✓" : "○"} ${p.name}` === picked);
+      if (idx < 0) return;
+      const prov = provs[idx];
+
+      if (!prov.authed) {
+        ctx.ui.notify(`"${prov.name}" has no API key set. Use env var or login first.`, "warning");
         return;
       }
 
-      // Step 1: pick a provider
-      const providerLabels = bases.map(b => {
-        const hasStored = as.list().some(a => a === b || a.startsWith(b + "-"));
-        return `${hasStored ? "✓" : "○"} ${b}`;
-      });
-      const picked = await ctx.ui.select("Select provider:", providerLabels);
-      if (!picked) return;
-      const idx = providerLabels.indexOf(picked);
-      if (idx < 0) return;
-      const provider = bases[idx];
-
-      // Step 2: pick model + switch (using shared helper)
-      await pickAndSwitchModel(pi, ctx, provider);
+      // Try all possible subscription names
+      for (const c of [prov.name, `${prov.name}-0`, `${prov.name}-1`]) {
+        const ok = await pickAndSwitchModel(pi, ctx, c);
+        if (ok) return;
+      }
+      ctx.ui.notify(`No models for "${prov.name}".`, "info");
     },
   });
 }
