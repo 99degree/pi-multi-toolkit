@@ -623,7 +623,9 @@ export function mergeConfigs(fileConfig: MultiPassConfig, envEntries: SubEntry[]
 
 export function normalizeEntries(entries: SubEntry[]): SubEntry[] { return entries; }
 
-export function subProviderName(entry: SubEntry): string { return `${entry.provider}-${entry.index}`; }
+export function subProviderName(entry: SubEntry): string {
+  return entry.index === 0 ? entry.provider : `${entry.provider}-${entry.index}`;
+}
 
 function subDisplayName(entry: SubEntry): string {
   const tmpl = PROVIDER_TEMPLATES[entry.provider];

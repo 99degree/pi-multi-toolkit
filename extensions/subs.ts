@@ -107,7 +107,7 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
           const key = await ctx.ui.input(`API key for ${provider}:`, "");
           if (!key?.trim()) { ctx.ui.notify("Canceled.", "info"); break; }
           // Store under the base sub name so models become available
-          as.set(`${provider}-0`, { type: "api_key", key: key.trim() });
+          as.set(provider, { type: "api_key", key: key.trim() });
           ctx.modelRegistry.refresh();
           ctx.ui.notify(`API key set for ${provider}.`, "info");
         }
