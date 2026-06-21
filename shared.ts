@@ -81,16 +81,8 @@ interface ProviderTemplate {
 
 export interface SubEntry { provider: string; index: number; label?: string; }
 
-export interface RouteConfig {
-  name: string;
-  provider: string;
-  model: string;
-  enabled?: boolean;
-}
-
 export interface MultiPassConfig {
   subscriptions: SubEntry[];
-  routes: RouteConfig[];
 }
 
 export interface ProjectConfig {
@@ -99,7 +91,6 @@ export interface ProjectConfig {
 
 export interface EffectiveConfig {
   subscriptions: SubEntry[];
-  routes: RouteConfig[];
   allowedProviderNames?: string[];
   projectConfigPath?: string;
 }
@@ -625,13 +616,15 @@ export function normalizeEntries(entries: SubEntry[]): SubEntry[] { return entri
 
 export function subProviderName(entry: SubEntry): string { return `${entry.provider}-${entry.index}`; }
 
+export function authConfigPath(): string { return join(getAgentDir(), "auth.json"); }
+
 function subDisplayName(entry: SubEntry): string {
   const tmpl = PROVIDER_TEMPLATES[entry.provider];
   const base = tmpl?.displayName || entry.provider;
   return entry.label ? `${entry.label} — ${base} #${entry.index}` : `${base} #${entry.index}`;
 }
 
-function getBaseProvider(providerName: string): string | undefined {
+export function getBaseProvider(providerName: string): string | undefined {
   if (PROVIDER_TEMPLATES[providerName]) return providerName;
   const m = providerName.match(/^(.+)-\d+$/);
   return m && PROVIDER_TEMPLATES[m[1]] ? m[1] : undefined;
@@ -662,14 +655,13 @@ function globalConfigPath(): string { return join(getAgentDir(), "multi-pass.jso
 function projectConfigPath(cwd: string): string { return join(cwd, ".pi", "multi-pass.json"); }
 
 function emptyMultiPassConfig(): MultiPassConfig {
-  return { subscriptions: [], routes: [] };
+  return { subscriptions: [] };
 }
 
 function normalizeMultiPassConfig(raw: unknown): MultiPassConfig {
   const parsed = typeof raw === "object" && raw ? (raw as Partial<MultiPassConfig>) : {};
   return {
     subscriptions: Array.isArray(parsed.subscriptions) ? parsed.subscriptions : [],
-    routes: Array.isArray(parsed.routes) ? parsed.routes : [],
   };
 }
 
@@ -710,16 +702,13 @@ export function loadEffectiveConfig(cwd: string): EffectiveConfig {
   const mergedSubs = normalizeEntries(mergeConfigs(global, envEntries));
   const project = loadProjectConfig(cwd);
   if (!project) {
-    return { subscriptions: mergedSubs, routes: global.routes };
+    return { subscriptions: mergedSubs };
   }
   const allowedNames = project.allowedSubs?.length ? new Set(project.allowedSubs) : undefined;
   const subs = allowedNames
     ? mergedSubs.filter((s) => allowedNames.has(subProviderName(s)))
     : mergedSubs;
-  const routes = allowedNames
-    ? global.routes.filter((r) => allowedNames.has(r.provider))
-    : global.routes;
-  return { subscriptions: subs, routes, allowedProviderNames: project.allowedSubs, projectConfigPath: projectConfigPath(cwd) };
+  return { subscriptions: subs, allowedProviderNames: project.allowedSubs, projectConfigPath: projectConfigPath(cwd) };
 }
 
 // ===========================================================================
