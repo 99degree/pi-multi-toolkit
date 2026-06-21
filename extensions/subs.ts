@@ -89,18 +89,27 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
 
       // ── Clone ──
       case choices[1]: {
-        // Find all logged-in providers (using hasAuth which checks env + stored)
+        // Show all template providers with auth status
         const as = ctx.modelRegistry.authStorage;
-        const baseNames = Object.keys(PROVIDER_TEMPLATES).filter(p => as.hasAuth(p) || as.hasAuth(`${p}-0`) || as.hasAuth(`${p}-1`)).sort();
-        if (!baseNames.length) {
-          ctx.ui.notify("No logged-in providers to clone. Login or set API key env var first.", "info");
+        const allNames = Object.keys(PROVIDER_TEMPLATES).sort();
+        const labels = allNames.map(p => {
+          const authed = as.hasAuth(p) || as.hasAuth(`${p}-0`) || as.hasAuth(`${p}-1`);
+          return `${authed ? "✓" : "○"} ${p}`;
+        });
+        const pick = await ctx.ui.select("Clone which provider?", labels);
+        if (!pick) break;
+        const idx = labels.indexOf(pick);
+        if (idx < 0) break;
+        const provider = allNames[idx];
+        const hasAuth = as.hasAuth(provider) || as.hasAuth(`${provider}-0`) || as.hasAuth(`${provider}-1`);
+
+        if (!hasAuth) {
+          ctx.ui.notify(`"${provider}" not logged in. Set API key via env var or use Login first.`, "warning");
           break;
         }
-        const pick = await ctx.ui.select("Clone which provider?", baseNames);
-        if (!pick) break;
 
-        const idx = nextCloneIndex(pick, cfg.subscriptions);
-        const entry: SubEntry = { provider: pick, index: idx };
+        const cloneIdx = nextCloneIndex(provider, cfg.subscriptions);
+        const entry: SubEntry = { provider, index: cloneIdx };
         cfg.subscriptions.push(entry);
         saveGlobalConfig(cfg);
         registerSub(pi, entry, (ctx as any));
@@ -163,9 +172,9 @@ async function cmdClone(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: st
   if (!PROVIDER_TEMPLATES[provider]) { ctx.ui.notify(`Unknown provider "${provider}".`, "error"); return; }
 
   const cfg = loadGlobalConfig();
-  // Check if provider has any auth (env, stored, or runtime)
   const as = ctx.modelRegistry.authStorage;
-  if (!as.hasAuth(provider) && !as.hasAuth(`${provider}-0`) && !as.hasAuth(`${provider}-1`)) {
+  const hasAuth = as.hasAuth(provider) || as.hasAuth(`${provider}-0`) || as.hasAuth(`${provider}-1`);
+  if (!hasAuth) {
     ctx.ui.notify(`"${provider}" is not logged in. Set API key env var or login first.`, "warning");
     return;
   }
