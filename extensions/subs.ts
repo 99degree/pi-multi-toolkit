@@ -104,8 +104,12 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
         const hasAuth = as.hasAuth(provider) || as.hasAuth(`${provider}-0`) || as.hasAuth(`${provider}-1`);
 
         if (!hasAuth) {
-          ctx.ui.notify(`"${provider}" not logged in. Set API key via env var or use Login first.`, "warning");
-          break;
+          const key = await ctx.ui.input(`API key for ${provider}:`, "");
+          if (!key?.trim()) { ctx.ui.notify("Canceled.", "info"); break; }
+          // Store under the base sub name so models become available
+          as.set(`${provider}-0`, { type: "api_key", key: key.trim() });
+          ctx.modelRegistry.refresh();
+          ctx.ui.notify(`API key set for ${provider}.`, "info");
         }
 
         const cloneIdx = nextCloneIndex(provider, cfg.subscriptions);
