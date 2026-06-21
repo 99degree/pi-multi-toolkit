@@ -376,7 +376,7 @@ export const PROVIDER_TEMPLATES: Record<string, ProviderTemplate> = {
 			{ id: "deepseek-ai/DeepSeek-V3", name: "DeepSeek V3", api: "openai-completions", baseUrl: "https://api.siliconflow.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0 }, contextWindow: 131072, maxTokens: 8192 },
 			{ id: "Qwen/Qwen2.5-72B-Instruct", name: "Qwen 2.5 72B Instruct", api: "openai-completions", baseUrl: "https://api.siliconflow.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0 }, contextWindow: 131072, maxTokens: 8192 },
 			{ id: "Qwen/QwQ-32B", name: "QwQ 32B", api: "openai-completions", baseUrl: "https://api.siliconflow.com/v1", reasoning: true, input: ["text"], cost: { input: 0, output: 0 }, contextWindow: 131072, maxTokens: 8192 },
-			{ id: "nex-agi/Nex-N2-Pro", name: "Nex N2 Pro", api: "openai-completions", baseUrl: "https://api.siliconflow.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0 }, contextWindow: 131072, maxTokens: 8192 },
+			{ id: "nex-agi/Nex-N2-Pro", name: "Nex N2 Pro", api: "openai-completions", baseUrl: "https://api.siliconflow.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0 }, contextWindow: 262144, maxTokens: 8192 },
 		],
 		builtinOAuth: {
 			id: "siliconflow", name: "SiliconFlow",
