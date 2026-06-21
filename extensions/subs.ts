@@ -91,7 +91,7 @@ async function showMenu(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
       case choices[1]: {
         // Find all logged-in providers (using hasAuth which checks env + stored)
         const as = ctx.modelRegistry.authStorage;
-        const baseNames = Object.keys(PROVIDER_TEMPLATES).filter(p => as.hasAuth(p)).sort();
+        const baseNames = Object.keys(PROVIDER_TEMPLATES).filter(p => as.hasAuth(p) || as.hasAuth(`${p}-0`) || as.hasAuth(`${p}-1`)).sort();
         if (!baseNames.length) {
           ctx.ui.notify("No logged-in providers to clone. Login or set API key env var first.", "info");
           break;
@@ -164,7 +164,8 @@ async function cmdClone(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: st
 
   const cfg = loadGlobalConfig();
   // Check if provider has any auth (env, stored, or runtime)
-  if (!ctx.modelRegistry.authStorage.hasAuth(provider)) {
+  const as = ctx.modelRegistry.authStorage;
+  if (!as.hasAuth(provider) && !as.hasAuth(`${provider}-0`) && !as.hasAuth(`${provider}-1`)) {
     ctx.ui.notify(`"${provider}" is not logged in. Set API key env var or login first.`, "warning");
     return;
   }
